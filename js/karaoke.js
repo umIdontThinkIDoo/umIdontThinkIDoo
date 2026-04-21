@@ -2,14 +2,8 @@ import { audio } from './audio.js';
 import { addRecording } from './storage.js';
 import { midiToNoteName, noteNameToMidi, midiToFreq } from './notes.js';
 import { toast } from './app.js';
-
-/**
- * Simple karaoke mode:
- *   - User uploads a backing track (MP3/M4A)
- *   - Optionally provides a reference melody as JSON: [{t: seconds, note: "G4", dur: 0.5}, ...]
- *   - Or uses the built-in demo melody
- *   - Plays backing track + mic listening, scores pitch accuracy against reference melody over time
- */
+import { get, update } from './state.js';
+import { analyzeFile, exportMelodyJson } from './analyzer.js';
 
 const DEMO_MELODY = [
   { t: 0.0, note: 'C4', dur: 0.5 },
@@ -22,34 +16,106 @@ const DEMO_MELODY = [
 ];
 
 export function renderKaraoke(root) {
-  let state = {
+  const saved = get('karaoke') || {};
+  const state = {
     audioUrl: null,
-    audioName: null,
-    melody: DEMO_MELODY,
-    melodyName: 'Demo (C major arpeggio)',
+    audioBlob: null,
+    audioName: saved.audioName || null,
+    melody: saved.melody || DEMO_MELODY,
+    melodyName: saved.melodyName || 'Demo (C major arpeggio)',
     playing: false,
-    detections: [], // {t, freq, midi}
+    detections: [],
     startTime: 0,
-    score: null
+    score: saved.lastScore != null ? saved.lastScore : null,
+    analyzing: false,
+    analyzeProgress: 0
   };
   let audioEl = null;
   let unsubscribe = null;
 
+  root.innerHTML = `
+    <div class="card">
+      <h2>Load a song</h2>
+      <p>Upload a backing track (MP3/M4A/WAV). You can also run the track through the <strong>Analyzer</strong> below to auto-generate a melody JSON for scoring.</p>
+      <div class="col">
+        <label class="btn ghost full">
+          <input type="file" id="audio-file" accept="audio/*" hidden>
+          <span id="audio-file-label">${state.audioName ? state.audioName : 'Choose backing track…'}</span>
+        </label>
+        <label class="btn ghost full">
+          <input type="file" id="melody-file" accept="application/json,.json" hidden>
+          <span id="melody-file-label">${state.melodyName ? state.melodyName : 'Melody JSON (optional)'}</span>
+        </label>
+      </div>
+      <div id="spotify-link-card" class="hint" style="margin-top:10px;">
+        Want to study a song on Spotify? Open it, note the vocal line, then upload an instrumental or the full track here — the analyzer will extract the melody contour.
+      </div>
+    </div>
+
+    <div class="card" id="pipeline-card">
+      <h2>Melody pipeline <span class="badge" id="pipeline-status">idle</span></h2>
+      <p>Runs YIN pitch detection over the uploaded audio and segments the result into notes. Works best on isolated vocals or solo instrument — full polyphonic tracks give approximate results.</p>
+      <button class="btn primary full" id="run-analyzer" disabled>Analyze uploaded track → melody JSON</button>
+      <div class="drill-progress" style="margin-top:10px;"><div id="analyze-bar" style="width:0%"></div></div>
+      <div class="row between" style="margin-top:8px;">
+        <span class="hint" id="analyze-detail">Upload a track above first.</span>
+        <button class="btn ghost" id="download-melody" disabled>Download JSON</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <canvas id="karaoke-canvas" class="pitch-track" width="900" height="180"></canvas>
+      <audio id="karaoke-audio" preload="auto" controls style="width:100%; margin-top:8px;"></audio>
+    </div>
+
+    <div class="card">
+      <div class="row" style="gap:8px;">
+        <button class="btn primary full" id="k-start">▶ Start & record</button>
+      </div>
+      <div id="score-area" style="margin-top:12px; ${state.score == null ? 'display:none;' : ''}">
+        <div class="score-ring" style="--val:${state.score || 0}"><div id="score-val">${state.score || 0}%</div></div>
+        <p class="hint" id="score-label" style="text-align:center;">${state.score != null ? grade(state.score) : ''}</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Custom melody format</h2>
+      <p class="hint">JSON array of notes: <code>[{"t": 0, "note": "G4", "dur": 0.5}]</code>. Times/durations in seconds relative to the track start. The analyzer above produces this format automatically.</p>
+    </div>
+  `;
+
+  const els = {
+    audioFile: root.querySelector('#audio-file'),
+    audioFileLabel: root.querySelector('#audio-file-label'),
+    melodyFile: root.querySelector('#melody-file'),
+    melodyFileLabel: root.querySelector('#melody-file-label'),
+    runAnalyzer: root.querySelector('#run-analyzer'),
+    downloadMelody: root.querySelector('#download-melody'),
+    pipelineStatus: root.querySelector('#pipeline-status'),
+    analyzeBar: root.querySelector('#analyze-bar'),
+    analyzeDetail: root.querySelector('#analyze-detail'),
+    canvas: root.querySelector('#karaoke-canvas'),
+    audio: root.querySelector('#karaoke-audio'),
+    kStart: root.querySelector('#k-start'),
+    scoreArea: root.querySelector('#score-area'),
+    scoreVal: root.querySelector('#score-val'),
+    scoreLabel: root.querySelector('#score-label')
+  };
+  audioEl = els.audio;
+
   const draw = () => {
-    const canvas = root.querySelector('#karaoke-canvas');
-    if (!canvas) return;
+    const canvas = els.canvas;
     const ctx = canvas.getContext('2d');
     const w = canvas.width, h = canvas.height;
     ctx.fillStyle = '#15151d';
     ctx.fillRect(0, 0, w, h);
     const midiMin = 45, midiMax = 84;
-    const totalT = Math.max(
-      state.melody.length ? state.melody[state.melody.length - 1].t + state.melody[state.melody.length - 1].dur : 5,
-      state.detections.length ? state.detections[state.detections.length - 1].t : 0,
-      5
-    );
+    const melodyEnd = state.melody.length
+      ? state.melody[state.melody.length - 1].t + state.melody[state.melody.length - 1].dur
+      : 5;
+    const detectionEnd = state.detections.length ? state.detections[state.detections.length - 1].t : 0;
+    const totalT = Math.max(melodyEnd, detectionEnd, audioEl.duration || 5, 5);
 
-    // Gridlines
     ctx.strokeStyle = '#2a2a38';
     ctx.lineWidth = 1;
     for (let m = midiMin; m <= midiMax; m += 12) {
@@ -57,7 +123,6 @@ export function renderKaraoke(root) {
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
     }
 
-    // Reference melody (as bars)
     for (const n of state.melody) {
       const midi = noteNameToMidi(n.note);
       if (!isFinite(midi)) continue;
@@ -68,7 +133,6 @@ export function renderKaraoke(root) {
       ctx.fillRect(x, y - 6, wx, 12);
     }
 
-    // Detected pitches
     ctx.strokeStyle = '#29d9c5';
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -81,7 +145,6 @@ export function renderKaraoke(root) {
     }
     ctx.stroke();
 
-    // Playhead
     if (audioEl && state.playing) {
       const t = audioEl.currentTime;
       const x = (t / totalT) * w;
@@ -89,89 +152,117 @@ export function renderKaraoke(root) {
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
     }
   };
+  draw();
 
-  const redraw = () => {
-    root.innerHTML = `
-      <div class="card">
-        <h2>Karaoke test</h2>
-        <p>Upload a backing track, then sing along. We compare your pitch to a reference melody and score accuracy.</p>
-        <div class="col">
-          <label class="btn ghost full">
-            <input type="file" id="audio-file" accept="audio/*" hidden>
-            <span>${state.audioName || 'Choose backing track…'}</span>
-          </label>
-          <label class="btn ghost full">
-            <input type="file" id="melody-file" accept="application/json,.json" hidden>
-            <span>${state.melodyName || 'Melody JSON (optional)'}</span>
-          </label>
-        </div>
-      </div>
-
-      <div class="card">
-        <canvas id="karaoke-canvas" class="pitch-track" width="900" height="180"></canvas>
-        <audio id="karaoke-audio" preload="auto" controls style="width:100%; margin-top:8px;"></audio>
-      </div>
-
-      <div class="card">
-        <div class="row" style="gap:8px;">
-          <button class="btn primary full" id="k-start">${state.playing ? '■ Stop' : '▶ Start & record'}</button>
-        </div>
-        ${state.score != null ? `
-          <div style="margin-top:12px;">
-            <div class="score-ring" style="--val:${state.score}"><div>${state.score}%</div></div>
-            <p class="hint" style="text-align:center;">${grade(state.score)}</p>
-          </div>` : ''}
-      </div>
-
-      <div class="card">
-        <h2>Custom melody format</h2>
-        <p class="hint">JSON array of notes: <code>[{"t": 0, "note": "G4", "dur": 0.5}]</code>. Times/durations in seconds relative to the track start. Get a reference melody from sheet music or by transcribing the vocal line.</p>
-      </div>
-    `;
-    audioEl = root.querySelector('#karaoke-audio');
-    if (state.audioUrl) audioEl.src = state.audioUrl;
-
-    root.querySelector('#audio-file').addEventListener('change', (e) => {
-      const f = e.target.files && e.target.files[0];
-      if (!f) return;
-      if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
-      state.audioUrl = URL.createObjectURL(f);
-      state.audioName = f.name;
-      state.audioBlob = f;
-      redraw();
-    });
-
-    root.querySelector('#melody-file').addEventListener('change', async (e) => {
-      const f = e.target.files && e.target.files[0];
-      if (!f) return;
-      try {
-        const text = await f.text();
-        const parsed = JSON.parse(text);
-        if (!Array.isArray(parsed)) throw new Error('JSON must be an array of notes');
-        for (const n of parsed) {
-          if (typeof n.t !== 'number' || typeof n.note !== 'string' || typeof n.dur !== 'number') {
-            throw new Error('Each note needs t (seconds), note (e.g. G4), dur (seconds).');
-          }
-        }
-        state.melody = parsed;
-        state.melodyName = f.name;
-        redraw();
-      } catch (err) { alert('Invalid melody JSON: ' + err.message); }
-    });
-
-    root.querySelector('#k-start').addEventListener('click', () => {
-      state.playing ? stop() : start();
-    });
-
-    // Animation frame for playhead
-    const loop = () => {
-      if (!state.playing) return;
-      draw();
-      requestAnimationFrame(loop);
-    };
-    if (state.playing) loop();
-    draw();
+  const setPipelineStatus = (label, tone) => {
+    els.pipelineStatus.textContent = label;
+    els.pipelineStatus.className = 'badge' + (tone ? ' ' + tone : '');
   };
+
+  const updateRunBtn = () => {
+    els.runAnalyzer.disabled = !state.audioBlob || state.analyzing;
+    els.runAnalyzer.textContent = state.analyzing
+      ? `Analyzing… ${Math.round(state.analyzeProgress * 100)}%`
+      : 'Analyze uploaded track → melody JSON';
+  };
+
+  els.audioFile.addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
+    state.audioUrl = URL.createObjectURL(f);
+    state.audioName = f.name;
+    state.audioBlob = f;
+    audioEl.src = state.audioUrl;
+    els.audioFileLabel.textContent = f.name;
+    els.analyzeDetail.textContent = `Ready: ${f.name} (${formatBytes(f.size)})`;
+    updateRunBtn();
+    update('karaoke', { audioName: f.name });
+  });
+
+  els.melodyFile.addEventListener('change', async (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    try {
+      const text = await f.text();
+      const parsed = JSON.parse(text);
+      if (!Array.isArray(parsed)) throw new Error('JSON must be an array of notes');
+      for (const n of parsed) {
+        if (typeof n.t !== 'number' || typeof n.note !== 'string' || typeof n.dur !== 'number') {
+          throw new Error('Each note needs t (seconds), note (e.g. G4), dur (seconds).');
+        }
+      }
+      state.melody = parsed;
+      state.melodyName = f.name;
+      els.melodyFileLabel.textContent = f.name;
+      update('karaoke', { melody: parsed, melodyName: f.name });
+      draw();
+      toast(`Loaded ${parsed.length} notes`);
+    } catch (err) { alert('Invalid melody JSON: ' + err.message); }
+  });
+
+  els.runAnalyzer.addEventListener('click', async () => {
+    if (!state.audioBlob || state.analyzing) return;
+    state.analyzing = true;
+    state.analyzeProgress = 0;
+    setPipelineStatus('decoding…', 'warn');
+    els.analyzeBar.style.width = '0%';
+    els.analyzeDetail.textContent = 'Decoding audio…';
+    updateRunBtn();
+    const started = performance.now();
+    try {
+      const result = await analyzeFile(state.audioBlob, {
+        onProgress: (p) => {
+          state.analyzeProgress = p;
+          els.analyzeBar.style.width = Math.round(p * 100) + '%';
+          els.analyzeDetail.textContent = `Detecting pitch… ${Math.round(p * 100)}%`;
+          setPipelineStatus(`analyzing ${Math.round(p * 100)}%`, 'warn');
+          updateRunBtn();
+        }
+      });
+      const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+      state.melody = result.melody;
+      state.melodyName = (state.audioName || 'track') + ' — auto melody';
+      els.melodyFileLabel.textContent = state.melodyName;
+      els.analyzeDetail.textContent = `${result.melody.length} notes extracted in ${elapsed}s`;
+      setPipelineStatus('done', 'ok');
+      els.analyzeBar.style.width = '100%';
+      els.downloadMelody.disabled = false;
+      els.downloadMelody.dataset.json = exportMelodyJson(result.melody);
+      update('karaoke', { melody: result.melody, melodyName: state.melodyName });
+      update('pipeline', {
+        lastFileName: state.audioName,
+        lastDurationSec: result.duration,
+        lastNoteCount: result.melody.length,
+        lastRunAt: Date.now()
+      });
+      draw();
+      toast(`Melody generated (${result.melody.length} notes)`);
+    } catch (err) {
+      setPipelineStatus('failed', 'bad');
+      els.analyzeDetail.textContent = 'Error: ' + (err.message || err);
+      toast('Analyzer failed');
+    } finally {
+      state.analyzing = false;
+      state.analyzeProgress = 0;
+      updateRunBtn();
+    }
+  });
+
+  els.downloadMelody.addEventListener('click', () => {
+    const json = els.downloadMelody.dataset.json;
+    if (!json) return;
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (state.audioName ? state.audioName.replace(/\.[^.]+$/, '') : 'melody') + '.melody.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+
+  els.kStart.addEventListener('click', () => { state.playing ? stop() : start(); });
+  updateRunBtn();
 
   async function start() {
     if (!state.audioUrl) { alert('Choose a backing track first.'); return; }
@@ -181,13 +272,13 @@ export function renderKaraoke(root) {
 
     state.detections = [];
     state.score = null;
+    els.scoreArea.style.display = 'none';
     state.playing = true;
     state.startTime = performance.now();
 
-    // Start mic recording
     audio.startRecording();
     unsubscribe = audio.subscribe((frame) => {
-      const t = audioEl ? audioEl.currentTime : (performance.now() - state.startTime) / 1000;
+      const t = audioEl.currentTime;
       state.detections.push({
         t,
         freq: frame.freq > 0 ? frame.freq : 0,
@@ -199,7 +290,11 @@ export function renderKaraoke(root) {
     audioEl.currentTime = 0;
     try { await audioEl.play(); } catch (e) { toast('Tap Start again (iOS autoplay)'); }
     audioEl.onended = () => stop();
-    redraw();
+    els.kStart.textContent = '■ Stop';
+    els.kStart.classList.remove('primary');
+    els.kStart.classList.add('danger');
+    const loop = () => { if (state.playing) { draw(); requestAnimationFrame(loop); } };
+    loop();
   }
 
   async function stop() {
@@ -219,15 +314,19 @@ export function renderKaraoke(root) {
       const target = melodyAtTime(d.t);
       if (target == null) continue;
       const refFreq = midiToFreq(target);
-      const detFreq = d.freq;
-      const cents = Math.abs(1200 * Math.log2(detFreq / refFreq));
-      // Octave-insensitive grading: take cents modulo 1200 closest to 0
+      const cents = Math.abs(1200 * Math.log2(d.freq / refFreq));
       const adj = Math.min(cents % 1200, 1200 - (cents % 1200));
       const noteScore = Math.max(0, 100 - (adj / 2));
       sum += noteScore;
       scored++;
     }
     state.score = scored ? Math.round(sum / scored) : 0;
+    update('karaoke', { lastScore: state.score });
+
+    els.scoreArea.style.display = '';
+    els.scoreArea.querySelector('.score-ring').style.setProperty('--val', state.score);
+    els.scoreVal.textContent = state.score + '%';
+    els.scoreLabel.textContent = grade(state.score);
 
     try {
       const rec = await audio.stopRecording();
@@ -244,8 +343,10 @@ export function renderKaraoke(root) {
         toast(`Karaoke scored ${state.score}% — saved`);
       }
     } catch (e) { console.error(e); }
-
-    redraw();
+    els.kStart.textContent = '▶ Start & record';
+    els.kStart.classList.add('primary');
+    els.kStart.classList.remove('danger');
+    draw();
   }
 
   function grade(s) {
@@ -256,10 +357,11 @@ export function renderKaraoke(root) {
     return 'Check your key — try transposing.';
   }
 
-  redraw();
+  function formatBytes(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1024 / 1024).toFixed(1) + ' MB';
+  }
 
-  return () => {
-    if (state.playing) stop();
-    if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
-  };
+  return {};
 }

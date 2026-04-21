@@ -2,6 +2,7 @@ import { audio } from './audio.js';
 import { midiToFreq, midiToNoteName, noteNameToMidi } from './notes.js';
 import { addSession } from './storage.js';
 import { toast } from './app.js';
+import { get, update } from './state.js';
 
 /**
  * Drill definitions — list of MIDI offsets from a tonic.
@@ -22,9 +23,10 @@ const NOTE_SEC = 1.4; // time per note (play + sing)
 const SCORE_WINDOW_SEC = 0.8; // time after tone to evaluate pitch
 
 export function renderDrills(root) {
+  const saved = get('drills') || {};
   let state = {
-    drill: DRILLS[0],
-    tonic: DEFAULT_TONIC,
+    drill: DRILLS.find((d) => d.id === saved.drillId) || DRILLS[0],
+    tonic: saved.tonic || DEFAULT_TONIC,
     running: false,
     idx: 0,
     scores: [],
@@ -81,9 +83,11 @@ export function renderDrills(root) {
 
     root.querySelector('#drill-select').addEventListener('change', (e) => {
       state.drill = DRILLS.find((d) => d.id === e.target.value);
+      update('drills', { drillId: state.drill.id });
     });
     root.querySelector('#tonic-select').addEventListener('change', (e) => {
       state.tonic = e.target.value;
+      update('drills', { tonic: state.tonic });
     });
     root.querySelector('#start-drill').addEventListener('click', () => {
       state.running ? stopDrill() : startDrill();

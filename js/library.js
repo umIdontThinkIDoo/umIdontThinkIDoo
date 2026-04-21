@@ -34,7 +34,9 @@ export function renderLibrary(root) {
   refresh(root);
   renderSpotify(root.querySelector('#spotify-root'));
 
-  return () => {};
+  return {
+    onActivate() { refresh(root); }
+  };
 }
 
 async function refresh(root) {

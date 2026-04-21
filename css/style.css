@@ -73,6 +73,12 @@ input, textarea {
   z-index: 10;
 }
 .app-header h1 { font-size: 17px; font-weight: 600; margin: 0; }
+.header-right { display: flex; align-items: center; gap: 8px; }
+.save-indicator {
+  font-size: 10px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
 .mic-status {
   font-size: 11px;
   color: var(--fg-dim);
@@ -81,6 +87,9 @@ input, textarea {
   border-radius: 999px;
 }
 .mic-status.on { color: var(--ok); border-color: var(--ok); }
+
+.view-panel { display: none; }
+.view-panel[data-active="true"] { display: block; }
 
 .view {
   flex: 1;
