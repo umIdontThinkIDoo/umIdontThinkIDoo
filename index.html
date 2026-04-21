@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Range" />
+  <meta name="theme-color" content="#0b0b10" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="stylesheet" href="css/style.css" />
+  <title>Range — Singing Practice</title>
+</head>
+<body>
+  <header class="app-header">
+    <h1 id="view-title">Tuner</h1>
+    <div class="mic-status" id="mic-status" aria-live="polite">mic: off</div>
+  </header>
+
+  <main id="view" class="view"></main>
+
+  <nav class="tabbar" role="tablist">
+    <button class="tab" data-view="tuner" aria-label="Tuner">
+      <span class="tab-icon">◐</span><span>Tuner</span>
+    </button>
+    <button class="tab" data-view="drills" aria-label="Drills">
+      <span class="tab-icon">♫</span><span>Drills</span>
+    </button>
+    <button class="tab" data-view="record" aria-label="Record">
+      <span class="tab-icon">●</span><span>Record</span>
+    </button>
+    <button class="tab" data-view="karaoke" aria-label="Karaoke">
+      <span class="tab-icon">☆</span><span>Karaoke</span>
+    </button>
+    <button class="tab" data-view="library" aria-label="Library">
+      <span class="tab-icon">❏</span><span>Library</span>
+    </button>
+  </nav>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
