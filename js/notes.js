@@ -67,4 +67,44 @@ export function classifyVoiceType(minMidi, maxMidi) {
   return best;
 }
 
+/**
+ * Shift a melody so it sits comfortably inside a user's measured range.
+ * Strategy:
+ *   - If the melody's span fits inside the user's span, center the melody's
+ *     mid-pitch on the user's mid-pitch.
+ *   - Otherwise, the melody is wider than the user — anchor the highest note
+ *     just below the user's ceiling with 2 semitones of headroom so the peak
+ *     notes are still reachable.
+ * Returns the shifted melody (array of {t, note, dur}) and the shift in
+ * semitones (negative = transposed down).
+ */
+export function transposeForRange(melody, userLowMidi, userHighMidi) {
+  if (!Array.isArray(melody) || !melody.length) return { melody, shift: 0 };
+  if (!isFinite(userLowMidi) || !isFinite(userHighMidi)) return { melody, shift: 0 };
+
+  const midis = melody.map((n) => noteNameToMidi(n.note)).filter((m) => isFinite(m));
+  if (!midis.length) return { melody, shift: 0 };
+  const melLow = Math.min(...midis);
+  const melHigh = Math.max(...midis);
+  const melCenter = (melLow + melHigh) / 2;
+  const userCenter = (userLowMidi + userHighMidi) / 2;
+  const userSpan = userHighMidi - userLowMidi;
+  const melSpan = melHigh - melLow;
+
+  let shift;
+  if (melSpan <= userSpan) {
+    shift = Math.round(userCenter - melCenter);
+  } else {
+    // Wider than user — park the peak 2 semitones below their ceiling
+    shift = userHighMidi - melHigh - 2;
+  }
+
+  const transposed = melody.map((n) => {
+    const midi = noteNameToMidi(n.note);
+    if (!isFinite(midi)) return n;
+    return { ...n, note: midiToNoteName(midi + shift) };
+  });
+  return { melody: transposed, shift };
+}
+
 export { NOTE_NAMES };

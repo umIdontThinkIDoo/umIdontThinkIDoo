@@ -5,17 +5,43 @@ import { toast } from './app.js';
 import { get, update } from './state.js';
 
 /**
- * Drill definitions — list of MIDI offsets from a tonic.
- * Tonic is chosen per-user (default C4) so singers pick what's comfortable.
+ * Drill definitions. Each has a tonic-relative sequence of semitone offsets.
+ * Grouped by category so the dropdown is navigable.
+ *
+ * R&B / mix-voice / falsetto drills target the kind of pitch control needed
+ * for tenor-range singers going for Chris Brown / Bryson Tiller / Brent
+ * Faiyaz / The Weeknd vibes: secure mix voice around the passagio (roughly
+ * E4-G4 for most male voices), clean falsetto flips, and pentatonic runs.
  */
 const DRILLS = [
-  { id: 'major-scale', name: 'Major scale (up & down)', offsets: [0, 2, 4, 5, 7, 9, 11, 12, 11, 9, 7, 5, 4, 2, 0] },
-  { id: 'minor-scale', name: 'Natural minor scale', offsets: [0, 2, 3, 5, 7, 8, 10, 12, 10, 8, 7, 5, 3, 2, 0] },
-  { id: 'arpeggio', name: 'Major arpeggio (1-3-5-8)', offsets: [0, 4, 7, 12, 7, 4, 0] },
-  { id: 'fifths', name: 'Perfect fifths', offsets: [0, 7, 0, 7, 0] },
-  { id: 'octave', name: 'Octave jumps', offsets: [0, 12, 0, 12, 0] },
-  { id: 'siren-up', name: 'Siren — up a fifth', offsets: [0, 2, 4, 5, 7] },
-  { id: 'rnb-run', name: 'R&B run (1-3-5-6-5-3-1)', offsets: [0, 4, 7, 9, 7, 4, 0] }
+  // --- Foundation ---
+  { id: 'major-scale',  category: 'Foundation', name: 'Major scale (up & down)', offsets: [0, 2, 4, 5, 7, 9, 11, 12, 11, 9, 7, 5, 4, 2, 0] },
+  { id: 'minor-scale',  category: 'Foundation', name: 'Natural minor scale',     offsets: [0, 2, 3, 5, 7, 8, 10, 12, 10, 8, 7, 5, 3, 2, 0] },
+  { id: 'arpeggio',     category: 'Foundation', name: 'Major arpeggio (1-3-5-8)', offsets: [0, 4, 7, 12, 7, 4, 0] },
+  { id: 'fifths',       category: 'Foundation', name: 'Perfect fifths',          offsets: [0, 7, 0, 7, 0] },
+  { id: 'octave',       category: 'Foundation', name: 'Octave jumps',            offsets: [0, 12, 0, 12, 0] },
+  { id: 'siren-up',     category: 'Foundation', name: 'Siren — up a fifth',      offsets: [0, 2, 4, 5, 7] },
+
+  // --- R&B / mix voice / falsetto ---
+  { id: 'pentatonic-run',     category: 'R&B runs',     name: 'Minor pentatonic run',         offsets: [0, 3, 5, 7, 10, 12, 10, 7, 5, 3, 0] },
+  { id: 'major-pentatonic',   category: 'R&B runs',     name: 'Major pentatonic run',         offsets: [0, 2, 4, 7, 9, 12, 9, 7, 4, 2, 0] },
+  { id: 'blues-descend',      category: 'R&B runs',     name: 'Blues scale descending',       offsets: [12, 10, 7, 6, 5, 3, 0] },
+  { id: 'rnb-run',            category: 'R&B runs',     name: 'R&B run (1-3-5-6-5-3-1)',      offsets: [0, 4, 7, 9, 7, 4, 0] },
+  { id: 'rnb-melisma',        category: 'R&B runs',     name: 'Melismatic ornament',          offsets: [0, 3, 5, 3, 5, 7, 5, 3, 0] },
+  { id: 'minor-third-slides', category: 'R&B runs',     name: 'Grace-note slides',            offsets: [0, 2, 3, 2, 3, 5, 3, 5, 7] },
+  { id: 'neo-soul-phrase',    category: 'R&B runs',     name: 'Neo-soul phrase',              offsets: [0, 3, 5, 7, 5, 3, 5, 3, 0] },
+
+  { id: 'mix-climb',          category: 'Mix voice',    name: 'Passagio climb (1-5-8)',       offsets: [0, 7, 12, 14, 12, 7, 0] },
+  { id: 'mix-stairs',         category: 'Mix voice',    name: 'Chest→mix stair-step',         offsets: [0, 4, 7, 11, 12, 11, 7, 4, 0] },
+  { id: 'mix-sustain',        category: 'Mix voice',    name: 'Sustained mix note',           offsets: [0, 12, 12, 12, 12] },
+
+  { id: 'falsetto-flip',      category: 'Falsetto',     name: 'Falsetto flip (octave break)', offsets: [0, 12, 0, 12, 0, 12, 0] },
+  { id: 'falsetto-fifth',     category: 'Falsetto',     name: 'Falsetto fifth flip',          offsets: [0, 7, 14, 7, 0] },
+  { id: 'head-voice-slides',  category: 'Falsetto',     name: 'Head-voice slides (1-8-10)',   offsets: [0, 12, 15, 12, 0] },
+
+  // --- Range extension ---
+  { id: 'high-note-attack',   category: 'Range',        name: 'High-note attack',             offsets: [0, 4, 7, 12, 15, 12, 7, 4, 0] },
+  { id: 'low-note-drop',      category: 'Range',        name: 'Low-note drop',                offsets: [12, 7, 4, 0, -5, 0, 4, 7, 12] }
 ];
 
 const DEFAULT_TONIC = 'C4';
@@ -48,7 +74,7 @@ export function renderDrills(root) {
         <h2>Drill</h2>
         <label class="hint">Pick a drill</label>
         <select id="drill-select">
-          ${DRILLS.map((d) => `<option value="${d.id}" ${d.id === state.drill.id ? 'selected' : ''}>${d.name}</option>`).join('')}
+          ${renderDrillOptions(state.drill.id)}
         </select>
         <div style="height:8px"></div>
         <label class="hint">Starting note (tonic)</label>
@@ -197,4 +223,21 @@ function tonicOptions() {
     }
   }
   return out;
+}
+
+function renderDrillOptions(selectedId) {
+  const groups = new Map();
+  for (const d of DRILLS) {
+    if (!groups.has(d.category)) groups.set(d.category, []);
+    groups.get(d.category).push(d);
+  }
+  let html = '';
+  for (const [cat, items] of groups) {
+    html += `<optgroup label="${cat}">`;
+    for (const d of items) {
+      html += `<option value="${d.id}"${d.id === selectedId ? ' selected' : ''}>${d.name}</option>`;
+    }
+    html += '</optgroup>';
+  }
+  return html;
 }

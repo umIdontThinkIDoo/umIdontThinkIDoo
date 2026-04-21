@@ -1,8 +1,9 @@
 import { audio } from './audio.js';
 import { addRecording } from './storage.js';
-import { midiToNoteName, noteNameToMidi, midiToFreq } from './notes.js';
+import { midiToNoteName, noteNameToMidi, midiToFreq, transposeForRange } from './notes.js';
 import { toast } from './app.js';
 import { get, update } from './state.js';
+import { settings } from './storage.js';
 import { analyzeFile, exportMelodyJson } from './analyzer.js';
 
 const DEMO_MELODY = [
@@ -73,9 +74,11 @@ export function renderKaraoke(root) {
     </div>
 
     <div class="card">
-      <div class="row" style="gap:8px;">
-        <button class="btn primary full" id="k-start">▶ Start & record</button>
+      <div class="grid-2">
+        <button class="btn primary" id="k-start">▶ Start &amp; record</button>
+        <button class="btn" id="k-transpose">↕ Transpose to my range</button>
       </div>
+      <div class="hint" id="transpose-hint" style="margin-top:8px;">Shift the melody so it sits in your detected vocal range. Sing low/high extremes in the Tuner to set your range first.</div>
       <div id="score-area" style="margin-top:12px; ${state.score == null ? 'display:none;' : ''}">
         <div class="score-ring" style="--val:${state.score || 0}"><div id="score-val">${state.score || 0}%</div></div>
         <p class="hint" id="score-label" style="text-align:center;">${state.score != null ? grade(state.score) : ''}</p>
@@ -102,6 +105,8 @@ export function renderKaraoke(root) {
     canvas: root.querySelector('#karaoke-canvas'),
     audio: root.querySelector('#karaoke-audio'),
     kStart: root.querySelector('#k-start'),
+    kTranspose: root.querySelector('#k-transpose'),
+    transposeHint: root.querySelector('#transpose-hint'),
     scoreArea: root.querySelector('#score-area'),
     scoreVal: root.querySelector('#score-val'),
     scoreLabel: root.querySelector('#score-label')
@@ -270,6 +275,36 @@ export function renderKaraoke(root) {
   });
 
   els.kStart.addEventListener('click', () => { state.playing ? stop() : start(); });
+
+  els.kTranspose.addEventListener('click', () => {
+    const low = settings.get('range.low', null);
+    const high = settings.get('range.high', null);
+    if (!low || !high) {
+      toast('Set your range first: open Tuner, sing a low note then a high note');
+      return;
+    }
+    if (!state.melody || !state.melody.length) {
+      toast('No melody loaded');
+      return;
+    }
+    const { melody: shifted, shift } = transposeForRange(state.melody, low.midi, high.midi);
+    if (shift === 0) {
+      toast('Already in your range');
+      return;
+    }
+    state.melody = shifted;
+    const baseName = (state.melodyName || 'melody').replace(/\s*\([-+]?\d+\s*semitones?\)\s*$/, '');
+    state.melodyName = `${baseName} (${shift > 0 ? '+' : ''}${shift} semitones)`;
+    els.melodyFileLabel.textContent = state.melodyName;
+    update('karaoke', { melody: shifted, melodyName: state.melodyName });
+    // Refresh downloadable JSON too
+    els.downloadMelody.dataset.json = exportMelodyJson(shifted);
+    els.downloadMelody.disabled = false;
+    draw();
+    const dir = shift > 0 ? 'up' : 'down';
+    toast(`Transposed ${dir} ${Math.abs(shift)} semitone${Math.abs(shift) === 1 ? '' : 's'}`);
+  });
+
   updateRunBtn();
 
   async function start() {
