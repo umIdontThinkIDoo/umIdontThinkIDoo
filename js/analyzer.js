@@ -1,38 +1,48 @@
 /**
  * Offline audio → melody JSON pipeline.
  *
- * Takes an audio file (mp3/m4a/wav), runs YIN over sliding windows, segments
- * consecutive same-note frames into notes, and produces melody JSON compatible
- * with the karaoke grader.
- *
- * Works best on: isolated vocals, acapella, solo instrument. Polyphonic music
- * (full songs with bass + drums + vocal) will produce approximate results —
- * the detector tracks whatever pitched source is loudest/clearest at each moment.
+ * Takes an audio file (mp3/m4a/wav), optionally runs frequency-domain center-
+ * channel isolation to pull the vocal out of a stereo mix, then runs YIN
+ * across sliding windows and segments consecutive same-note frames into notes.
  */
 
 import { yinPitch, rms } from './pitch.js';
 import { freqToMidi, midiToNoteName } from './notes.js';
+import { isolateCenter } from './separate.js';
 
 const WINDOW = 2048;
-const HOP = 512;           // ~11.6 ms @ 44.1kHz
-const YIELD_EVERY = 40;    // yield to UI every N frames
-const SILENCE_RMS = 0.005; // below this the segment is considered silence
-const MIN_NOTE_SEC = 0.12; // merge anything shorter than this
+const HOP = 512;
+const YIELD_EVERY = 40;
+const SILENCE_RMS = 0.005;
+const MIN_NOTE_SEC = 0.12;
 
-export async function analyzeFile(file, { onProgress, signal } = {}) {
-  const ac = new (window.OfflineAudioContext || window.webkitOfflineAudioContext
-    || window.AudioContext || window.webkitAudioContext)(1, 44100, 44100);
-  // OfflineAudioContext needs concrete length before decode; use a regular ctx just for decodeAudioData
+export async function analyzeFile(file, { onProgress, signal, isolateVocals = 'auto' } = {}) {
   const decodeCtx = new (window.AudioContext || window.webkitAudioContext)();
   const ab = await file.arrayBuffer();
   const audioBuf = await decodeCtx.decodeAudioData(ab.slice(0));
   decodeCtx.close();
 
-  const sr = audioBuf.sampleRate;
-  const mono = toMono(audioBuf);
-  const totalFrames = Math.max(0, Math.floor((mono.length - WINDOW) / HOP));
+  const isStereo = audioBuf.numberOfChannels >= 2;
+  const runIsolation = isolateVocals === true || (isolateVocals === 'auto' && isStereo);
 
-  const rawFrames = []; // { t, freq, midi, rms }
+  const sr = audioBuf.sampleRate;
+  let mono;
+  let stage = 'pitch';
+
+  if (runIsolation && isStereo) {
+    stage = 'separate';
+    if (onProgress) onProgress(0, 'separate');
+    mono = await isolateCenter(audioBuf, {
+      signal,
+      onProgress: (p) => { if (onProgress) onProgress(p, 'separate'); }
+    });
+  } else {
+    mono = toMono(audioBuf);
+  }
+
+  stage = 'pitch';
+  const totalFrames = Math.max(0, Math.floor((mono.length - WINDOW) / HOP));
+  const rawFrames = [];
   for (let f = 0; f < totalFrames; f++) {
     if (signal && signal.aborted) throw new Error('aborted');
     const start = f * HOP;
@@ -50,16 +60,13 @@ export async function analyzeFile(file, { onProgress, signal } = {}) {
       rms: level
     });
     if (f % YIELD_EVERY === 0) {
-      if (onProgress) onProgress(f / totalFrames);
+      if (onProgress) onProgress(f / totalFrames, 'pitch');
       await new Promise((r) => setTimeout(r, 0));
     }
   }
-  if (onProgress) onProgress(1);
+  if (onProgress) onProgress(1, 'pitch');
 
-  // Median filter MIDI to kill isolated detection errors
   const smoothed = medianFilterMidi(rawFrames, 5);
-
-  // Segment into notes
   const notes = segmentNotes(smoothed, HOP, sr);
 
   const melody = notes.map((n) => ({
@@ -72,7 +79,9 @@ export async function analyzeFile(file, { onProgress, signal } = {}) {
     melody,
     frames: smoothed,
     duration: audioBuf.duration,
-    sampleRate: sr
+    sampleRate: sr,
+    isolatedVocals: runIsolation && isStereo,
+    channels: audioBuf.numberOfChannels
   };
 }
 

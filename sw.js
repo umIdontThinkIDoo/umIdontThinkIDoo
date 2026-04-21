@@ -1,4 +1,4 @@
-const CACHE = 'range-v2';
+const CACHE = 'range-v3';
 const ASSETS = [
   './',
   './index.html',
@@ -11,6 +11,8 @@ const ASSETS = [
   './js/storage.js',
   './js/state.js',
   './js/analyzer.js',
+  './js/fft.js',
+  './js/separate.js',
   './js/tuner.js',
   './js/drills.js',
   './js/record.js',

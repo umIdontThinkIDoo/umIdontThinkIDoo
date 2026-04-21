@@ -54,7 +54,11 @@ export function renderKaraoke(root) {
 
     <div class="card" id="pipeline-card">
       <h2>Melody pipeline <span class="badge" id="pipeline-status">idle</span></h2>
-      <p>Runs YIN pitch detection over the uploaded audio and segments the result into notes. Works best on isolated vocals or solo instrument — full polyphonic tracks give approximate results.</p>
+      <p>Runs YIN pitch detection over the uploaded audio and segments the result into notes. For stereo tracks the pipeline can first isolate the center channel (typical placement for lead vocals) to reject stereo-spread instruments.</p>
+      <label class="row" style="gap:8px; margin-bottom:8px;">
+        <input type="checkbox" id="isolate-toggle" checked>
+        <span>Isolate vocals before pitch detection (stereo only)</span>
+      </label>
       <button class="btn primary full" id="run-analyzer" disabled>Analyze uploaded track → melody JSON</button>
       <div class="drill-progress" style="margin-top:10px;"><div id="analyze-bar" style="width:0%"></div></div>
       <div class="row between" style="margin-top:8px;">
@@ -94,6 +98,7 @@ export function renderKaraoke(root) {
     pipelineStatus: root.querySelector('#pipeline-status'),
     analyzeBar: root.querySelector('#analyze-bar'),
     analyzeDetail: root.querySelector('#analyze-detail'),
+    isolateToggle: root.querySelector('#isolate-toggle'),
     canvas: root.querySelector('#karaoke-canvas'),
     audio: root.querySelector('#karaoke-audio'),
     kStart: root.querySelector('#k-start'),
@@ -212,11 +217,13 @@ export function renderKaraoke(root) {
     const started = performance.now();
     try {
       const result = await analyzeFile(state.audioBlob, {
-        onProgress: (p) => {
+        isolateVocals: els.isolateToggle.checked,
+        onProgress: (p, stage) => {
           state.analyzeProgress = p;
           els.analyzeBar.style.width = Math.round(p * 100) + '%';
-          els.analyzeDetail.textContent = `Detecting pitch… ${Math.round(p * 100)}%`;
-          setPipelineStatus(`analyzing ${Math.round(p * 100)}%`, 'warn');
+          const label = stage === 'separate' ? 'Isolating vocals' : 'Detecting pitch';
+          els.analyzeDetail.textContent = `${label}… ${Math.round(p * 100)}%`;
+          setPipelineStatus(`${stage === 'separate' ? 'separating' : 'analyzing'} ${Math.round(p * 100)}%`, 'warn');
           updateRunBtn();
         }
       });
@@ -224,7 +231,8 @@ export function renderKaraoke(root) {
       state.melody = result.melody;
       state.melodyName = (state.audioName || 'track') + ' — auto melody';
       els.melodyFileLabel.textContent = state.melodyName;
-      els.analyzeDetail.textContent = `${result.melody.length} notes extracted in ${elapsed}s`;
+      const isoNote = result.isolatedVocals ? ' (center-channel isolated)' : '';
+      els.analyzeDetail.textContent = `${result.melody.length} notes extracted in ${elapsed}s${isoNote}`;
       setPipelineStatus('done', 'ok');
       els.analyzeBar.style.width = '100%';
       els.downloadMelody.disabled = false;
