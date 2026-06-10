@@ -2147,7 +2147,7 @@ function _renderRecipes() {
   html += `</div>`;  // /#cookbook-dl-tab-fold-body (whole Download card body)
 
   // Search section
-  html += '</div></div></div></div>';
+  html += '</div></div></div>';
   html += '<div class="cookbook-group" data-backend-group="Search">';
   html += '<div class="admin-card" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">';
   html += '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">';
@@ -2329,6 +2329,7 @@ function _renderRecipes() {
     html += _serverEntryHtml(_es.servers[i], i, _es.defaultServer || '', false);
   }
   html += `</div>`;
+  html += '</div>';  // end servers-toolbar
   html += '</div>';  // end Servers admin-card
   html += '</div>';  // end Settings group
 
@@ -2415,8 +2416,6 @@ function _renderRecipes() {
   html += _trainingStatusHtml('rl');
   html += '</div>';
   html += '</div>';  // end RLLoop group
-
-  html += '</div>';  // outer cookbook body container
 
   body.innerHTML = html;
   _wireTabEvents(body);
