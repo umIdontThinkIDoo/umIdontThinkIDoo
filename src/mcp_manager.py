@@ -5,6 +5,7 @@ Manages connections to MCP (Model Context Protocol) tool servers.
 Each server exposes tools that are made available to the agent loop.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -138,10 +139,16 @@ class McpManager:
         self._tools: Dict[str, List[Dict]] = {}
         # server_id -> MCP ClientSession
         self._sessions: Dict[str, Any] = {}
-        # server_id -> exit stack (for cleanup)
-        self._stacks: Dict[str, Any] = {}
-        # server_id -> background connect task (HTTP transport / OAuth)
+        # server_id -> the long-lived task that owns the connection's contexts.
+        # The transports (stdio/sse/http) run anyio task groups whose cancel
+        # scopes are bound to the task that enters them, so one task must both
+        # enter and exit them — see _serve_connection.
         self._connect_tasks: Dict[str, Any] = {}
+        # server_id -> Event the owner task waits on; set to request teardown.
+        self._close_events: Dict[str, "asyncio.Event"] = {}
+        # server_id -> last connect exception (distinguishes a real failure from
+        # an HTTP connect that's merely still awaiting authorization).
+        self._connect_errors: Dict[str, Any] = {}
         # Tracking updates to tools/connections for RAG indexing / prompt cache
         self._generation = 0
 
@@ -176,173 +183,28 @@ class McpManager:
             self._generation += 1
             return False
 
-    async def _connect_stdio(self, server_id: str, name: str, command: str, args: List[str], env: Dict[str, str]) -> bool:
-        """Connect to an MCP server via stdio transport."""
+    async def _serve_connection(self, server_id, name, transport_label, open_transport,
+                                ready, close, conn_extra=None):
+        """Own an MCP connection's whole lifecycle inside a single task.
+
+        stdio/sse/http transports run anyio task groups whose cancel scopes are
+        bound to the task that *enters* them. The old code entered the context in
+        the connect task and later called ``aclose()`` from the shutdown/request
+        task, which raised "Attempted to exit cancel scope in a different task".
+        Here one long-lived task enters the context, signals ``ready``, holds it
+        open until ``close`` is set, then exits the context — so entry and exit
+        share a task and teardown is clean. The session is still safe to use from
+        other tasks for request/response; only context teardown must stay here.
+        """
+        from contextlib import AsyncExitStack
+        from mcp import ClientSession
+
+        stack = AsyncExitStack()
         try:
-            from mcp import ClientSession, StdioServerParameters
-            from mcp.client.stdio import stdio_client
-            from contextlib import AsyncExitStack
-
-            server_params = StdioServerParameters(
-                command=command,
-                args=args,
-                env={**os.environ, **env} if env else None,
-            )
-
-            stack = AsyncExitStack()
-            try:
-                transport = await stack.enter_async_context(stdio_client(server_params))
-                read_stream, write_stream = transport
-                session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-
-                await session.initialize()
-
-                # Discover tools
-                tools_result = await session.list_tools()
-            except Exception:
-                await stack.aclose()
-                raise
-            tools = []
-            for tool in tools_result.tools:
-                tools.append({
-                    "name": tool.name,
-                    "description": tool.description or "",
-                    "input_schema": tool.inputSchema if hasattr(tool, 'inputSchema') else {},
-                    # MCP tool annotations (readOnlyHint / destructiveHint) drive
-                    # plan-mode read-only gating. Absent on many servers, so we
-                    # fall back to a name heuristic in mcp_tool_is_readonly().
-                    "annotations": getattr(tool, 'annotations', None),
-                })
-
-            self._sessions[server_id] = session
-            self._stacks[server_id] = stack
-            self._tools[server_id] = tools
-            # Extract identity hints from env vars (e.g. email address, API name)
-            # so tool descriptions can distinguish between multiple instances of
-            # the same MCP server (e.g. two email accounts).
-            identity_hints = []
-            for k, v in (env or {}).items():
-                k_lower = k.lower()
-                if any(x in k_lower for x in ['email_address', 'account', 'user', 'username']):
-                    identity_hints.append(v)
-            identity = ", ".join(identity_hints) if identity_hints else ""
-
-            self._connections[server_id] = {
-                "status": "connected",
-                "name": name,
-                "transport": "stdio",
-                "tool_count": len(tools),
-                "identity": identity,
-            }
-
-            logger.info(f"MCP server connected: {name} ({server_id}) - {len(tools)} tools via stdio")
-            return True
-
-        except ImportError:
-            logger.warning("MCP package not installed. Install with: pip install mcp")
-            self._connections[server_id] = {"status": "error", "error": "mcp package not installed", "name": name}
-            return False
-
-    async def _connect_sse(self, server_id: str, name: str, url: str) -> bool:
-        """Connect to an MCP server via SSE transport."""
-        try:
-            from mcp import ClientSession
-            from mcp.client.sse import sse_client
-            from contextlib import AsyncExitStack
-
-            stack = AsyncExitStack()
-            try:
-                transport = await stack.enter_async_context(sse_client(url))
-                read_stream, write_stream = transport
-                session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-
-                await session.initialize()
-
-                # Discover tools
-                tools_result = await session.list_tools()
-            except Exception:
-                await stack.aclose()
-                raise
-            tools = []
-            for tool in tools_result.tools:
-                tools.append({
-                    "name": tool.name,
-                    "description": tool.description or "",
-                    "input_schema": tool.inputSchema if hasattr(tool, 'inputSchema') else {},
-                    # MCP tool annotations (readOnlyHint / destructiveHint) drive
-                    # plan-mode read-only gating. Absent on many servers, so we
-                    # fall back to a name heuristic in mcp_tool_is_readonly().
-                    "annotations": getattr(tool, 'annotations', None),
-                })
-
-            self._sessions[server_id] = session
-            self._stacks[server_id] = stack
-            self._tools[server_id] = tools
-            self._connections[server_id] = {
-                "status": "connected",
-                "name": name,
-                "transport": "sse",
-                "tool_count": len(tools),
-            }
-
-            logger.info(f"MCP server connected: {name} ({server_id}) - {len(tools)} tools via SSE")
-            return True
-
-        except ImportError:
-            logger.warning("MCP package not installed. Install with: pip install mcp")
-            self._connections[server_id] = {"status": "error", "error": "mcp package not installed", "name": name}
-            return False
-
-    async def _start_http_connect(self, server_id: str, name: str, url: str, wait: float = 8.0) -> bool:
-        """Begin a Streamable HTTP connect in the background. Returns within
-        `wait` seconds: True if it connected (cached-token path), otherwise the
-        flow is awaiting browser authorization and status becomes 'needs_auth'."""
-        import asyncio
-        self._connections[server_id] = {"status": "connecting", "name": name, "transport": "http"}
-        task = asyncio.create_task(self._connect_http(server_id, name, url))
-        self._connect_tasks[server_id] = task
-        done, _ = await asyncio.wait({task}, timeout=wait)
-        if task in done:
-            try:
-                return task.result()
-            except Exception as e:
-                self._connections[server_id] = {"status": "error", "error": str(e), "name": name}
-                return False
-        # Still running → either awaiting authorization, or discovery/DCR is
-        # still in flight. If _on_redirect already published needs_auth+auth_url,
-        # leave it; otherwise mark needs_auth (auth_url filled in once it fires).
-        from src.mcp_oauth import pop_auth_url
-        cur = self._connections.get(server_id, {})
-        if cur.get("status") != "needs_auth":
-            self._connections[server_id] = {
-                "status": "needs_auth", "name": name, "transport": "http",
-                "auth_url": pop_auth_url(server_id),
-            }
-        return False
-
-    async def _connect_http(self, server_id: str, name: str, url: str) -> bool:
-        """Connect to a Streamable HTTP MCP server (with automatic OAuth)."""
-        try:
-            from mcp import ClientSession
-            from mcp.client.streamable_http import streamablehttp_client
-            from contextlib import AsyncExitStack
-            from src.mcp_oauth import build_provider, clear_auth_url
-
-            def _on_redirect(auth_url):
-                # Publish needs_auth the moment the URL is known, independent of
-                # how long discovery/DCR took (may exceed the bounded start wait).
-                self._connections[server_id] = {
-                    "status": "needs_auth", "name": name, "transport": "http",
-                    "auth_url": auth_url,
-                }
-
-            provider = build_provider(server_id, url, on_redirect=_on_redirect)
-            stack = AsyncExitStack()
-            transport = await stack.enter_async_context(streamablehttp_client(url, auth=provider))
-            read_stream, write_stream, _get_session_id = transport
+            transport = await stack.enter_async_context(open_transport())
+            read_stream, write_stream = transport[0], transport[1]
             session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
             await session.initialize()
-
             tools_result = await session.list_tools()
             tools = []
             for tool in tools_result.tools:
@@ -350,54 +212,205 @@ class McpManager:
                     "name": tool.name,
                     "description": tool.description or "",
                     "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
+                    # MCP tool annotations (readOnlyHint / destructiveHint) drive
+                    # plan-mode read-only gating. Absent on many servers, so we
+                    # fall back to a name heuristic in mcp_tool_is_readonly().
+                    "annotations": getattr(tool, "annotations", None),
                 })
 
             self._sessions[server_id] = session
-            self._stacks[server_id] = stack
             self._tools[server_id] = tools
-            self._connections[server_id] = {
-                "status": "connected", "name": name, "transport": "http",
-                "tool_count": len(tools),
-            }
-            clear_auth_url(server_id)
-            # Tools changed (this can complete after connect_server already
-            # returned, via the background OAuth flow), so bump the generation
-            # to invalidate the tool-prompt cache.
+            info = {"status": "connected", "name": name,
+                    "transport": transport_label, "tool_count": len(tools)}
+            if conn_extra:
+                info.update(conn_extra)
+            self._connections[server_id] = info
             self._generation += 1
-            logger.info(f"MCP server connected: {name} ({server_id}) - {len(tools)} tools via http")
-            return True
+            if transport_label == "http":
+                try:
+                    from src.mcp_oauth import clear_auth_url
+                    clear_auth_url(server_id)
+                except Exception:
+                    pass
+            logger.info(f"MCP server connected: {name} ({server_id}) - {len(tools)} tools via {transport_label}")
+        except Exception as exc:
+            self._connect_errors[server_id] = exc
+            # Don't clobber a needs_auth status published by the OAuth redirect.
+            if self._connections.get(server_id, {}).get("status") != "needs_auth":
+                self._connections[server_id] = {
+                    "status": "error",
+                    "error": _format_mcp_connection_error(name, "", [], exc),
+                    "name": name,
+                }
+            try:
+                await stack.aclose()
+            except Exception:
+                pass
+            ready.set()
+            return
+        ready.set()
+
+        # Hold the contexts open in THIS task until teardown is requested.
+        try:
+            await close.wait()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            try:
+                await stack.aclose()
+            except Exception as exc:
+                logger.debug(f"MCP {server_id} context close: {exc}")
+
+    async def _start_owned(self, server_id, name, transport_label, open_transport,
+                           conn_extra=None, wait=None) -> bool:
+        """Launch the owner task for a connection and wait until it's ready.
+
+        Returns True on a live connection. With ``wait`` set (HTTP), a timeout
+        means the task is still connecting (e.g. awaiting OAuth) and keeps
+        running in the background — the caller decides how to report that.
+        """
+        await self._stop_owner(server_id)
+        ready = asyncio.Event()
+        close = asyncio.Event()
+        self._close_events[server_id] = close
+        self._connect_errors.pop(server_id, None)
+        task = asyncio.create_task(
+            self._serve_connection(server_id, name, transport_label,
+                                   open_transport, ready, close, conn_extra)
+        )
+        self._connect_tasks[server_id] = task
+        if wait is None:
+            await ready.wait()
+        else:
+            try:
+                await asyncio.wait_for(asyncio.shield(ready.wait()), timeout=wait)
+            except asyncio.TimeoutError:
+                return False
+        if self._connect_errors.get(server_id) is not None:
+            return False
+        return self._connections.get(server_id, {}).get("status") == "connected"
+
+    async def _stop_owner(self, server_id):
+        """Signal the owner task to tear down and wait for it to exit its own
+        contexts (so aclose runs in the task that entered them)."""
+        close = self._close_events.pop(server_id, None)
+        if close is not None:
+            close.set()
+        task = self._connect_tasks.pop(server_id, None)
+        if task is None:
+            return
+        if task.done():
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=10.0)
+        except asyncio.TimeoutError:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    async def _connect_stdio(self, server_id: str, name: str, command: str, args: List[str], env: Dict[str, str]) -> bool:
+        """Connect to an MCP server via stdio transport."""
+        try:
+            from mcp import StdioServerParameters
+            from mcp.client.stdio import stdio_client
         except ImportError:
             logger.warning("MCP package not installed. Install with: pip install mcp")
             self._connections[server_id] = {"status": "error", "error": "mcp package not installed", "name": name}
             return False
-        except Exception as e:
-            logger.error(f"Failed to connect HTTP MCP server {name} ({server_id}): {e}")
-            self._connections[server_id] = {"status": "error", "error": str(e), "name": name}
+
+        server_params = StdioServerParameters(
+            command=command,
+            args=args,
+            env={**os.environ, **env} if env else None,
+        )
+        # Extract identity hints from env vars (e.g. email address, API name) so
+        # tool descriptions can distinguish multiple instances of the same server.
+        identity_hints = []
+        for k, v in (env or {}).items():
+            if any(x in k.lower() for x in ['email_address', 'account', 'user', 'username']):
+                identity_hints.append(v)
+        identity = ", ".join(identity_hints) if identity_hints else ""
+
+        return await self._start_owned(
+            server_id, name, "stdio",
+            lambda: stdio_client(server_params),
+            conn_extra={"identity": identity},
+        )
+
+    async def _connect_sse(self, server_id: str, name: str, url: str) -> bool:
+        """Connect to an MCP server via SSE transport."""
+        try:
+            from mcp.client.sse import sse_client
+        except ImportError:
+            logger.warning("MCP package not installed. Install with: pip install mcp")
+            self._connections[server_id] = {"status": "error", "error": "mcp package not installed", "name": name}
             return False
+        return await self._start_owned(server_id, name, "sse", lambda: sse_client(url))
+
+    async def _start_http_connect(self, server_id: str, name: str, url: str, wait: float = 8.0) -> bool:
+        """Begin a Streamable HTTP connect. Returns within `wait` seconds: True
+        if it connected (cached-token path), otherwise the flow is awaiting
+        browser authorization and status becomes 'needs_auth' while the owner
+        task keeps connecting in the background."""
+        try:
+            from mcp.client.streamable_http import streamablehttp_client
+            from src.mcp_oauth import build_provider
+        except ImportError:
+            logger.warning("MCP package not installed. Install with: pip install mcp")
+            self._connections[server_id] = {"status": "error", "error": "mcp package not installed", "name": name}
+            return False
+
+        self._connections[server_id] = {"status": "connecting", "name": name, "transport": "http"}
+
+        def _on_redirect(auth_url):
+            # Publish needs_auth the moment the URL is known, independent of how
+            # long discovery/DCR took (may exceed the bounded start wait).
+            self._connections[server_id] = {
+                "status": "needs_auth", "name": name, "transport": "http",
+                "auth_url": auth_url,
+            }
+
+        provider = build_provider(server_id, url, on_redirect=_on_redirect)
+        ok = await self._start_owned(
+            server_id, name, "http",
+            lambda: streamablehttp_client(url, auth=provider),
+            wait=wait,
+        )
+        if ok:
+            return True
+        # A recorded error means a hard failure (status already set); otherwise
+        # the bounded wait elapsed while still connecting / awaiting auth.
+        if self._connect_errors.get(server_id) is not None:
+            return False
+        from src.mcp_oauth import pop_auth_url
+        cur = self._connections.get(server_id, {})
+        if cur.get("status") not in ("needs_auth", "connected"):
+            self._connections[server_id] = {
+                "status": "needs_auth", "name": name, "transport": "http",
+                "auth_url": pop_auth_url(server_id),
+            }
+        return False
 
     async def disconnect_server(self, server_id: str):
         """Disconnect from an MCP server."""
-        # Cancel any in-flight HTTP/OAuth background connect so it stops
-        # publishing status for a server that may be getting deleted.
-        task = self._connect_tasks.pop(server_id, None)
-        if task is not None and not task.done():
-            task.cancel()
         try:
             from src.mcp_oauth import clear_auth_url
             clear_auth_url(server_id)
         except Exception:
             pass
 
-        stack = self._stacks.pop(server_id, None)
-        if stack:
-            try:
-                await stack.aclose()
-            except Exception as e:
-                logger.warning(f"Error closing MCP server {server_id}: {e}")
+        # Signal the owner task to exit and close its contexts in its own task,
+        # avoiding the cross-task "exit cancel scope in a different task" error.
+        await self._stop_owner(server_id)
 
         self._sessions.pop(server_id, None)
         self._tools.pop(server_id, None)
         self._connections.pop(server_id, None)
+        self._connect_errors.pop(server_id, None)
         self._generation += 1
         logger.info(f"MCP server disconnected: {server_id}")
 
