@@ -2200,10 +2200,6 @@ function _renderRecipes() {
   html += '<button class="cookbook-tab" data-backend="Serve"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1"/><circle cx="6" cy="18" r="1"/></svg>Serve</button>';
   html += '<button class="cookbook-tab" data-backend="Dependencies"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>Dependencies</button>';
   html += '<button class="cookbook-tab" data-backend="Settings"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings</button>';
-  html += '<button class="cookbook-tab" data-backend="Train"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>Train</button>';
-  html += '<button class="cookbook-tab" data-backend="QLoRA"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="9" y2="12"/><line x1="15" y1="12" x2="21" y2="12"/></svg>QLoRA</button>';
-  html += '<button class="cookbook-tab" data-backend="RLLoop"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>RL Loop</button>';
-  html += '<button class="cookbook-tab" data-backend="Ingest"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Ingest</button>';
   html += '</div>';
 
   // Search group
@@ -2474,128 +2470,8 @@ function _renderRecipes() {
   html += '</div>';  // end Servers admin-card
   html += '</div>';  // end Settings group
 
-  // ── Train group (SFT / DPO / CPT) ────────────────────────────────────
-  html += '<div class="cookbook-group hidden" data-backend-group="Train" style="flex:1;overflow-y:auto;">';
-  html += '<div class="admin-card" style="flex:0 0 auto;">';
-  html += '<h2><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:5px;opacity:0.7"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>Fine-Tuning</h2>';
-  html += '<p class="memory-desc" style="margin-bottom:10px;">Train a model with SFT, DPO, or CPT using QLoRA. Requires TRL, PEFT, and bitsandbytes.<br><code style="font-size:10px">pip install trl peft transformers datasets bitsandbytes</code></p>';
-  // Sub-tabs
-  html += '<div class="cookbook-subtabs" id="train-subtabs">';
-  html += '<button class="cookbook-subtab active" data-train-tab="sft">SFT</button>';
-  html += '<button class="cookbook-subtab" data-train-tab="dpo">DPO</button>';
-  html += '<button class="cookbook-subtab" data-train-tab="cpt">CPT</button>';
-  html += '</div>';
-  // SFT panel
-  html += '<div class="train-subpanel" data-train-panel="sft">';
-  html += '<p class="memory-desc" style="margin:6px 0 8px">Supervised Fine-Tuning: teach instruction following from a labeled dataset.</p>';
-  html += _trainingFormHtml('sft');
-  html += '</div>';
-  // DPO panel
-  html += '<div class="train-subpanel" data-train-panel="dpo" style="display:none">';
-  html += '<p class="memory-desc" style="margin:6px 0 8px">Direct Preference Optimization: align a model to prefer good over bad responses.</p>';
-  html += _trainingFormHtml('dpo');
-  html += '</div>';
-  // CPT panel
-  html += '<div class="train-subpanel" data-train-panel="cpt" style="display:none">';
-  html += '<p class="memory-desc" style="margin:6px 0 8px">Continued Pre-Training: inject raw domain text before instruction tuning.</p>';
-  html += _trainingFormHtml('cpt');
-  html += '</div>';
-  html += '</div>';
-  // Job status
-  html += _trainingStatusHtml('train');
-  html += '</div>';  // end Train group
-
-  // ── QLoRA group ───────────────────────────────────────────────────────
-  html += '<div class="cookbook-group hidden" data-backend-group="QLoRA" style="flex:1;overflow-y:auto;">';
-  html += '<div class="admin-card" style="flex:0 0 auto;">';
-  html += '<h2><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:5px;opacity:0.7"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></svg>QLoRA Merge</h2>';
-  html += '<p class="memory-desc" style="margin-bottom:10px;">Merge a trained LoRA adapter into the base model to produce a single deployable model.</p>';
-  html += '<div class="settings-col" style="gap:8px;">';
-  html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Base Model</label><input type="text" class="memory-search-input" id="qlora-base-model" placeholder="meta-llama/Llama-3.2-1B" style="flex:1"></div>';
-  html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Adapter Path</label><input type="text" class="memory-search-input" id="qlora-adapter-path" placeholder="data/lora_adapters/sft-xxxxx" style="flex:1"></div>';
-  html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Output Name</label><input type="text" class="memory-search-input" id="qlora-output-name" placeholder="my-merged-model" style="flex:1"></div>';
-  html += '</div>';
-  html += '<button class="cookbook-btn" id="qlora-start-btn" style="margin-top:12px;width:100%">Merge Adapter</button>';
-  html += _trainingStatusHtml('qlora');
-  html += '</div>';
-  html += '</div>';  // end QLoRA group
-
-  // ── RL Loop group ─────────────────────────────────────────────────────
-  html += '<div class="cookbook-group hidden" data-backend-group="RLLoop" style="flex:1;overflow-y:auto;">';
-  html += '<div class="admin-card" style="flex:0 0 auto;">';
-  html += '<h2><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:5px;opacity:0.7"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>RL Loop <span style="font-size:10px;opacity:0.55;font-weight:normal;margin-left:4px;">Student → PhD</span></h2>';
-  html += '<p class="memory-desc" style="margin-bottom:10px;">Trains a model to become a knowledge expert on a book using GRPO reinforcement learning. Progresses through 5 curriculum levels: Student → Intermediate → Advanced → Expert → PhD.</p>';
-  html += '<div class="settings-col" style="gap:8px;">';
-  // Model
-  html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Base Model</label><input type="text" class="memory-search-input" id="rl-model-id" placeholder="meta-llama/Llama-3.2-1B" style="flex:1"><button class="cookbook-btn" id="rl-model-pick-btn" style="padding:4px 8px;margin-left:4px;flex-shrink:0" title="Pick from downloaded models">Browse</button></div>';
-  // Book upload
-  html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Book</label><select class="memory-search-input" id="rl-book-select" style="flex:1"><option value="">— select or upload —</option></select><button class="cookbook-btn" id="rl-book-upload-btn" style="padding:4px 8px;margin-left:4px;flex-shrink:0">Upload</button><input type="file" id="rl-book-file-input" accept=".pdf,.epub,.txt,.md" style="display:none"></div>';
-  // Seed
-  html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Seed</label><input type="number" class="memory-search-input" id="rl-seed" value="42" min="0" max="999999" style="width:90px"><span style="opacity:0.5;font-size:11px;margin-left:8px">Reproducibility seed for the training run</span></div>';
-  // Hyperparams (collapsible)
-  html += '<details style="margin-top:4px"><summary style="cursor:pointer;font-size:11px;opacity:0.6;list-style:none;display:flex;align-items:center;gap:4px"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>Hyperparameters</summary>';
-  html += '<div class="settings-col" style="gap:6px;margin-top:8px;">';
-  html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">LoRA Rank</label><input type="number" class="memory-search-input" id="rl-lora-rank" value="16" min="4" max="128" style="width:70px"></div>';
-  html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Learning Rate</label><input type="text" class="memory-search-input" id="rl-lr" value="2e-5" style="width:80px"></div>';
-  html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Epochs/Level</label><input type="number" class="memory-search-input" id="rl-epochs" value="1" min="1" max="10" style="width:70px"></div>';
-  html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Output Name</label><input type="text" class="memory-search-input" id="rl-output-name" placeholder="expert-on-bookname" style="flex:1"></div>';
-  html += '</div></details>';
-  html += '</div>';
-  html += '<div style="display:flex;gap:8px;margin-top:12px;">';
-  html += '<button class="cookbook-btn" id="rl-start-btn" style="flex:1">Start RL Loop</button>';
-  html += '<button class="cookbook-btn" id="rl-stop-btn" style="padding:6px 12px;opacity:0.7" disabled>Stop</button>';
-  html += '</div>';
-  // Progress
-  html += '<div id="rl-level-progress" style="margin-top:10px;display:none">';
-  html += '<div style="font-size:11px;opacity:0.7;margin-bottom:4px">Curriculum Progress</div>';
-  html += '<div class="rl-level-bar">';
-  for (const lvl of ['Student','Intermediate','Advanced','Expert','PhD']) {
-    html += `<div class="rl-level-pip" data-level="${lvl.toLowerCase()}" title="${lvl}">${lvl[0]}</div>`;
-  }
-  html += '</div>';
-  html += '</div>';
-  html += _trainingStatusHtml('rl');
-  html += '</div>';
-  html += '</div>';  // end RLLoop group
-
-  // ── Ingest group ──────────────────────────────────────────────────────────
-  html += '<div class="cookbook-group hidden" data-backend-group="Ingest" style="flex:1;overflow-y:auto;">';
-  html += '<div class="admin-card" style="flex:0 0 auto;">';
-  html += '<h2><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:5px;opacity:0.7"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>RAG Ingest</h2>';
-  html += '<p class="memory-desc" style="margin-bottom:10px;">Upload files or folders to index into the RAG knowledge base. Supports PDF, EPUB, TXT, MD, DOCX. Indexed chunks become available in all chats when RAG is enabled.</p>';
-  // Drop zone
-  html += '<div class="ingest-drop-zone" id="ingest-drop-zone">';
-  html += '<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="display:block;margin:0 auto 6px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>';
-  html += '<div class="ingest-drop-label">Drop files here, or use the buttons below</div>';
-  html += '<div class="ingest-drop-hint">PDF, EPUB, TXT, MD, DOCX — up to 200 MB each</div>';
-  html += '</div>';
-  // Action buttons
-  html += '<div class="ingest-actions">';
-  html += '<button class="cookbook-btn" id="ingest-pick-files" style="flex:1"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:4px"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>Pick Files</button>';
-  html += '<button class="cookbook-btn" id="ingest-pick-folder" style="flex:1"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:4px"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Pick Folder</button>';
-  html += '<button class="cookbook-btn" id="ingest-clear-btn" style="opacity:0.6" title="Clear results">Clear</button>';
-  html += '</div>';
-  html += '<input type="file" id="ingest-file-input" multiple accept=".pdf,.epub,.txt,.md,.docx,.rst,.csv" style="display:none">';
-  html += '<input type="file" id="ingest-folder-input" multiple webkitdirectory style="display:none">';
-  // Overall progress
-  html += '<div class="ingest-overall" id="ingest-overall">';
-  html += '<div class="ingest-overall-label"><span id="ingest-overall-label-text">Processing…</span><span id="ingest-overall-pct">0%</span></div>';
-  html += '<div class="ingest-bar-track"><div class="ingest-bar-fill" id="ingest-overall-bar"></div></div>';
-  html += '<div class="ingest-stats-row">';
-  html += '<div class="ingest-stat">Files: <b id="ingest-stat-files">0/0</b></div>';
-  html += '<div class="ingest-stat">Chunks: <b id="ingest-stat-chunks">0</b></div>';
-  html += '<div class="ingest-stat" id="ingest-stat-rag"></div>';
-  html += '</div>';
-  html += '</div>';
-  // File list
-  html += '<div class="ingest-file-list" id="ingest-file-list"></div>';
-  html += '</div>';
-  html += '</div>';  // end Ingest group
-
   body.innerHTML = html;
   _wireTabEvents(body);
-  _wireTrainingEvents(body);
-  _wireIngestEvents(body);
 
   // Auto-init What Fits
   _hwfitInit();

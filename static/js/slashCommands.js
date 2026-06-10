@@ -1072,6 +1072,62 @@ async function _cmdSessionUnimportant(args, ctx) {
   return true;
 }
 
+async function _cmdGoal(args, ctx) {
+  const goalText = args.join(' ').trim();
+  if (!goalText) { slashReply('Usage: /goal &lt;description&gt;  — creates a pinned chat for this goal'); return true; }
+
+  const sessions = sessionModule.getSessions();
+  const curSess  = sessions.find(s => s.id === ctx.sid);
+  let endpointUrl = curSess?.endpoint_url || '';
+  let model       = curSess?.model || '';
+  let endpointId  = curSess?.endpoint_id || '';
+
+  if (!endpointUrl || !model) {
+    try {
+      const dc = await fetch(`${API_BASE}/api/default-chat`, { credentials: 'same-origin' }).then(r=>r.json());
+      if (dc.endpoint_url && dc.model) { endpointUrl = dc.endpoint_url; model = dc.model; endpointId = dc.endpoint_id || ''; }
+    } catch (_) {}
+  }
+  if (!endpointUrl || !model) {
+    const w = sessions.filter(s => s.endpoint_url && s.model && !s.archived);
+    if (w.length) { endpointUrl = w[0].endpoint_url; model = w[0].model; endpointId = w[0].endpoint_id || ''; }
+  }
+  if (!endpointUrl || !model) { slashReply('No model available — add a model endpoint first.'); return true; }
+
+  const fd = new FormData();
+  fd.append('name', `Goal: ${goalText}`);
+  fd.append('endpoint_url', endpointUrl);
+  fd.append('model', model);
+  fd.append('skip_validation', 'true');
+  if (endpointId) fd.append('endpoint_id', endpointId);
+
+  const res = await fetch(`${API_BASE}/api/session`, { method: 'POST', body: fd, credentials: 'same-origin' });
+  if (!res.ok) { slashReply('Failed to create goal session.'); return true; }
+  const data = await res.json();
+  const sid = data.id;
+
+  const patchFd = new FormData();
+  patchFd.append('folder', 'Goals');
+  await fetch(`${API_BASE}/api/session/${sid}`, { method: 'PATCH', body: patchFd, credentials: 'same-origin' }).catch(()=>{});
+
+  const impFd = new FormData();
+  impFd.append('important', 'true');
+  await fetch(`${API_BASE}/api/session/${sid}/important`, { method: 'POST', body: impFd, credentials: 'same-origin' }).catch(()=>{});
+
+  await fetch(`${API_BASE}/api/memory/add`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ content: `Goal: ${goalText}`, category: 'goal', source: 'slash-command' }),
+  }).catch(()=>{});
+
+  await sessionModule.loadSessions();
+  await sessionModule.selectSession(sid);
+  _hideWelcomeScreen();
+  await typewriterReply(`Goal pinned: <b>${ctx.esc(goalText)}</b><br><br>A dedicated chat has been created and pinned in the <b>Goals</b> folder. Track your progress here — every message in this chat is tied to this goal.`);
+  return true;
+}
+
 async function _cmdSessionFork(args, ctx) {
   if (!ctx.sid) { slashReply('No active session'); return true; }
   const keepCount = parseInt(args[0]) || 0;
@@ -5695,6 +5751,14 @@ async function _cmdHelp(args, ctx) {
 // when the command is invoked bare (e.g. `/chats` -> info).
 
 const COMMANDS = {
+  goal: {
+    alias: ['g'],
+    category: 'Goals',
+    help: 'Pin a goal as a dedicated chat',
+    noUserBubble: false,
+    handler: _cmdGoal,
+    usage: '/goal <description>',
+  },
   chats: {
     alias: ['chat', 'session', 'sessions', 's'],
     category: 'Chats',
