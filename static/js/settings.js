@@ -1609,6 +1609,67 @@ async function initAgentSettings() {
     (supInput && supInput.checked ? ' · supervisor on' : '');
 }
 
+/* ── Generation Defaults (AI tab) ── */
+async function initGenDefaultsSettings() {
+  var tempSlider  = el('set-gen-temperature');
+  var tempVal     = el('set-gen-temp-val');
+  var tokSlider   = el('set-gen-max-tokens');
+  var tokVal      = el('set-gen-tokens-val');
+  var toppSlider  = el('set-gen-top-p');
+  var toppVal     = el('set-gen-topp-val');
+  var ctxSlider   = el('set-gen-ctx-window');
+  var ctxVal      = el('set-gen-ctx-val');
+  var saveBtn     = el('set-genDefaultsSave');
+  var msg         = el('set-genDefaultsMsg');
+  if (!tempSlider) return;
+
+  function fmtTemp(v)   { return parseFloat(v).toFixed(1); }
+  function fmtTok(v)    { return parseInt(v) > 8192 ? 'No limit' : parseInt(v).toLocaleString(); }
+  function fmtTopp(v)   { return parseFloat(v) >= 1.0 ? '1.0' : parseFloat(v).toFixed(2); }
+  function fmtCtx(v)    { var n = parseInt(v); return n >= 131072 ? 'Max' : (n >= 1024 ? Math.round(n/1024)+'k' : String(n)); }
+
+  // Load saved defaults from localStorage / server prefs
+  try {
+    var stored = JSON.parse(localStorage.getItem('odysseus-gen-defaults') || '{}');
+    if (stored.temperature != null)  { tempSlider.value  = stored.temperature;  tempVal.textContent  = fmtTemp(stored.temperature); }
+    if (stored.max_tokens != null)   { tokSlider.value   = stored.max_tokens || 8448; tokVal.textContent = fmtTok(tokSlider.value); }
+    if (stored.top_p != null)        { toppSlider.value  = stored.top_p;         toppVal.textContent  = fmtTopp(stored.top_p); }
+    if (stored.context_window != null){ ctxSlider.value  = stored.context_window || 131072; ctxVal.textContent = fmtCtx(ctxSlider.value); }
+  } catch(e) {}
+
+  tempSlider.addEventListener('input',  () => tempVal.textContent  = fmtTemp(tempSlider.value));
+  tokSlider.addEventListener('input',   () => tokVal.textContent   = fmtTok(tokSlider.value));
+  toppSlider.addEventListener('input',  () => toppVal.textContent  = fmtTopp(toppSlider.value));
+  ctxSlider.addEventListener('input',   () => ctxVal.textContent   = fmtCtx(ctxSlider.value));
+
+  async function save() {
+    var rawTok = parseInt(tokSlider.value);
+    var defaults = {
+      temperature:    Math.max(0, Math.min(2, parseFloat(tempSlider.value))),
+      max_tokens:     rawTok > 8192 ? 0 : rawTok,
+      top_p:          parseFloat(toppSlider.value) >= 1.0 ? null : parseFloat(toppSlider.value),
+      context_window: parseInt(ctxSlider.value) >= 131072 ? null : parseInt(ctxSlider.value),
+    };
+    localStorage.setItem('odysseus-gen-defaults', JSON.stringify(defaults));
+    // Persist to server prefs so they survive localStorage clears
+    try {
+      await fetch('/api/prefs/gen-defaults', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ value: defaults }),
+      });
+      if (msg) { msg.textContent = 'Saved.'; setTimeout(() => { msg.textContent = ''; }, 2000); }
+    } catch(e) { if (msg) msg.textContent = 'Saved locally (server sync failed).'; }
+  }
+
+  if (saveBtn) saveBtn.addEventListener('click', save);
+  // Expose globals for chat.js to read
+  window._getGenDefaults = () => {
+    try { return JSON.parse(localStorage.getItem('odysseus-gen-defaults') || '{}'); } catch(e) { return {}; }
+  };
+}
+
 /* ═══════════════════════════════════════════
    APPEARANCE TAB
    ═══════════════════════════════════════════ */
@@ -2195,6 +2256,7 @@ function initAll() {
   initResearchSettings();
   initResearchSearchSettings();
   initAgentSettings();
+  initGenDefaultsSettings();
   initAppearance();
   initShortcuts();
   initAccount();

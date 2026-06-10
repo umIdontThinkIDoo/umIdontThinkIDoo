@@ -36606,3 +36606,59 @@ body.theme-frosted .modal {
    the input beside it (.confirm-btn won't stretch on its own). */
 .ask-user-other-send { flex-shrink: 0; white-space: nowrap; min-height: 39px; }
 .ask-user-other-send:disabled { opacity: 0.5; cursor: default; }
+
+/* ── Training tabs & RL Loop UI ──────────────────────────────────────────── */
+.cookbook-subtabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+.cookbook-subtab {
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--fg);
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.65;
+  transition: opacity 0.12s, border-color 0.12s;
+}
+.cookbook-subtab:hover { opacity: 0.9; }
+.cookbook-subtab.active {
+  opacity: 1;
+  border-color: var(--accent, var(--red));
+  color: var(--accent, var(--red));
+}
+.rl-level-bar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.rl-level-pip {
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 600;
+  opacity: 0.45;
+  transition: opacity 0.3s, background 0.3s, border-color 0.3s;
+}
+.rl-level-pip.rl-level-done {
+  opacity: 1;
+  background: color-mix(in srgb, var(--accent, var(--red)) 20%, var(--panel));
+  border-color: var(--accent, var(--red));
+  color: var(--accent, var(--red));
+}
+.rl-level-pip.rl-level-active {
+  opacity: 1;
+  border-color: var(--accent, var(--red));
+  animation: rl-pip-pulse 1s ease-in-out infinite;
+}
+@keyframes rl-pip-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent, var(--red)) 40%, transparent); }
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, var(--red)) 0%, transparent); }
+}

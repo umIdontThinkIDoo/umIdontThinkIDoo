@@ -1762,6 +1762,289 @@ export function _serverEntryHtml(s, i, defaultServer, forceRemote, isNew) {
   return html;
 }
 
+// ── Training panel helpers ────────────────────────────────────────────────
+
+function _trainingFormHtml(type) {
+  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+  let h = '<div class="settings-col" style="gap:8px;margin-top:8px;">';
+  h += `<div class="settings-row"><label class="settings-label" style="min-width:110px">Base Model</label><input type="text" class="memory-search-input" id="${type}-model-id" placeholder="meta-llama/Llama-3.2-1B" style="flex:1"></div>`;
+  h += `<div class="settings-row"><label class="settings-label" style="min-width:110px">Dataset</label><input type="text" class="memory-search-input" id="${type}-dataset" placeholder="HF dataset id or local JSONL path" style="flex:1"></div>`;
+  h += `<div class="settings-row"><label class="settings-label" style="min-width:110px">Output Name</label><input type="text" class="memory-search-input" id="${type}-output-name" placeholder="${type}-adapter" style="flex:1"></div>`;
+  h += '<details style="margin-top:2px"><summary style="cursor:pointer;font-size:11px;opacity:0.6;list-style:none;display:flex;align-items:center;gap:4px"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>Hyperparameters</summary>';
+  h += '<div class="settings-col" style="gap:6px;margin-top:8px;">';
+  h += `<div class="settings-row"><label class="settings-label" style="min-width:110px">LoRA Rank</label><input type="number" class="memory-search-input" id="${type}-lora-rank" value="16" min="4" max="128" style="width:70px"></div>`;
+  h += `<div class="settings-row"><label class="settings-label" style="min-width:110px">Learning Rate</label><input type="text" class="memory-search-input" id="${type}-lr" value="${type==='sft'?'2e-4':'1e-4'}" style="width:80px"></div>`;
+  h += `<div class="settings-row"><label class="settings-label" style="min-width:110px">Epochs</label><input type="number" class="memory-search-input" id="${type}-epochs" value="${type==='cpt'?1:3}" min="1" max="20" style="width:70px"></div>`;
+  h += `<div class="settings-row"><label class="settings-label" style="min-width:110px">Batch Size</label><input type="number" class="memory-search-input" id="${type}-batch-size" value="2" min="1" max="16" style="width:70px"></div>`;
+  h += `<div class="settings-row"><label class="settings-label" style="min-width:110px">Seed</label><input type="number" class="memory-search-input" id="${type}-seed" value="42" style="width:80px"></div>`;
+  h += '</div></details>';
+  h += '</div>';
+  h += `<button class="cookbook-btn" id="${type}-start-btn" style="margin-top:10px;width:100%">Start ${type.toUpperCase()}</button>`;
+  return h;
+}
+
+function _trainingStatusHtml(prefix) {
+  return `<div id="${prefix}-job-status" style="margin-top:10px;display:none">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+      <span id="${prefix}-job-badge" style="font-size:11px;padding:2px 7px;border-radius:99px;background:var(--panel);border:1px solid var(--border);">idle</span>
+      <button id="${prefix}-job-stop" class="cookbook-btn" style="padding:3px 8px;font-size:11px;opacity:0.7" disabled>Stop</button>
+    </div>
+    <div id="${prefix}-job-log" style="font-family:monospace;font-size:10px;max-height:180px;overflow-y:auto;background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:6px 8px;white-space:pre-wrap;word-break:break-word;"></div>
+  </div>`;
+}
+
+let _trainingPollers = {};
+
+async function _startTrainingJob(payload) {
+  try {
+    const res = await fetch('/api/training/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    return await res.json();
+  } catch (e) {
+    throw e;
+  }
+}
+
+async function _stopTrainingJob(jobId) {
+  await fetch(`/api/training/stop/${jobId}`, { method: 'POST', credentials: 'same-origin' });
+}
+
+function _streamJobLogs(jobId, logEl, badgeEl, stopBtn) {
+  // Clear any previous poller
+  if (_trainingPollers[jobId]) return;
+  let offset = 0;
+  _trainingPollers[jobId] = setInterval(async () => {
+    try {
+      const res = await fetch(`/api/training/logs/${jobId}?offset=${offset}`, { credentials: 'same-origin' });
+      if (!res.ok) return;
+      const lines = (await res.text()).split('\n');
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const d = JSON.parse(line.slice(6));
+          if (d.line !== undefined) {
+            logEl.textContent += d.line + '\n';
+            logEl.scrollTop = logEl.scrollHeight;
+            offset += new TextEncoder().encode(d.line + '\n').length;
+            // Detect curriculum level completion
+            const m = d.line.match(/Level (\d): (\w+) complete/);
+            if (m) {
+              const pip = document.querySelector(`.rl-level-pip[data-level="${m[2].toLowerCase()}"]`);
+              if (pip) pip.classList.add('rl-level-done');
+            }
+          }
+          if (d.done) {
+            clearInterval(_trainingPollers[jobId]);
+            delete _trainingPollers[jobId];
+            if (badgeEl) badgeEl.textContent = 'done';
+            if (stopBtn) { stopBtn.disabled = true; }
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }, 800);
+}
+
+function _getTrainingField(id) {
+  const el = document.getElementById(id);
+  return el ? el.value.trim() : '';
+}
+
+function _wireTrainTypeBtn(type, body) {
+  const btn = body.querySelector(`#${type}-start-btn`);
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const modelId = _getTrainingField(`${type}-model-id`);
+    if (!modelId) { alert('Please enter a base model ID.'); return; }
+    const statusDiv = body.querySelector(`#train-job-status`);
+    const logEl = body.querySelector(`#train-job-log`);
+    const badgeEl = body.querySelector(`#train-job-badge`);
+    const stopBtn = body.querySelector(`#train-job-stop`);
+    if (statusDiv) statusDiv.style.display = '';
+    if (logEl) logEl.textContent = '';
+    if (badgeEl) { badgeEl.textContent = 'starting…'; badgeEl.style.color = 'var(--fg)'; }
+    btn.disabled = true;
+    try {
+      const result = await _startTrainingJob({
+        job_type: type,
+        model_id: modelId,
+        dataset_path: _getTrainingField(`${type}-dataset`) || null,
+        seed: parseInt(_getTrainingField(`${type}-seed`) || '42'),
+        lora_rank: parseInt(_getTrainingField(`${type}-lora-rank`) || '16'),
+        lr: parseFloat(_getTrainingField(`${type}-lr`) || '2e-4'),
+        epochs: parseInt(_getTrainingField(`${type}-epochs`) || '3'),
+        batch_size: parseInt(_getTrainingField(`${type}-batch-size`) || '2'),
+        output_name: _getTrainingField(`${type}-output-name`) || null,
+      });
+      if (badgeEl) { badgeEl.textContent = 'running'; badgeEl.style.color = 'var(--green, #50fa7b)'; }
+      if (stopBtn) { stopBtn.disabled = false; stopBtn.onclick = () => _stopTrainingJob(result.job_id); }
+      _streamJobLogs(result.job_id, logEl, badgeEl, stopBtn);
+    } catch (e) {
+      if (badgeEl) { badgeEl.textContent = 'error'; badgeEl.style.color = 'var(--red)'; }
+      if (logEl) logEl.textContent = String(e);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+function _wireTrainingEvents(body) {
+  // Sub-tab switching (Train panel)
+  body.querySelectorAll('.cookbook-subtab[data-train-tab]').forEach(tab => {
+    tab.addEventListener('click', () => {
+      body.querySelectorAll('.cookbook-subtab[data-train-tab]').forEach(t => t.classList.toggle('active', t === tab));
+      body.querySelectorAll('.train-subpanel[data-train-panel]').forEach(p => {
+        p.style.display = p.dataset.trainPanel === tab.dataset.trainTab ? '' : 'none';
+      });
+    });
+  });
+
+  // SFT / DPO / CPT start buttons
+  _wireTrainTypeBtn('sft', body);
+  _wireTrainTypeBtn('dpo', body);
+  _wireTrainTypeBtn('cpt', body);
+
+  // QLoRA merge
+  const qloraBtn = body.querySelector('#qlora-start-btn');
+  if (qloraBtn) {
+    qloraBtn.addEventListener('click', async () => {
+      const modelId = _getTrainingField('qlora-base-model');
+      const adapterPath = _getTrainingField('qlora-adapter-path');
+      if (!modelId || !adapterPath) { alert('Base model and adapter path are required.'); return; }
+      const logEl = body.querySelector('#qlora-job-log');
+      const badgeEl = body.querySelector('#qlora-job-badge');
+      const stopBtn = body.querySelector('#qlora-job-stop');
+      const statusDiv = body.querySelector('#qlora-job-status');
+      if (statusDiv) statusDiv.style.display = '';
+      if (logEl) logEl.textContent = '';
+      if (badgeEl) badgeEl.textContent = 'merging…';
+      qloraBtn.disabled = true;
+      try {
+        const result = await _startTrainingJob({
+          job_type: 'qlora',
+          model_id: modelId,
+          base_adapter_path: adapterPath,
+          output_name: _getTrainingField('qlora-output-name') || null,
+          seed: 42, lora_rank: 16, lora_alpha: 32, lr: 2e-4, epochs: 1, batch_size: 1, grad_accum: 1,
+        });
+        if (badgeEl) { badgeEl.textContent = 'running'; }
+        if (stopBtn) { stopBtn.disabled = false; stopBtn.onclick = () => _stopTrainingJob(result.job_id); }
+        _streamJobLogs(result.job_id, logEl, badgeEl, stopBtn);
+      } catch (e) {
+        if (badgeEl) { badgeEl.textContent = 'error'; }
+        if (logEl) logEl.textContent = String(e);
+      } finally {
+        qloraBtn.disabled = false;
+      }
+    });
+  }
+
+  // RL Loop
+  const rlStartBtn = body.querySelector('#rl-start-btn');
+  const rlStopBtn = body.querySelector('#rl-stop-btn');
+  const rlFileInput = body.querySelector('#rl-book-file-input');
+  const rlBookSelect = body.querySelector('#rl-book-select');
+  const rlUploadBtn = body.querySelector('#rl-book-upload-btn');
+
+  // Load available books
+  if (rlBookSelect) {
+    fetch('/api/training/books', { credentials: 'same-origin' })
+      .then(r => r.json())
+      .then(data => {
+        (data.books || []).forEach(b => {
+          const opt = document.createElement('option');
+          opt.value = b.filename; opt.textContent = `${b.filename} (${b.size_mb} MB)`;
+          rlBookSelect.appendChild(opt);
+        });
+      }).catch(() => {});
+  }
+
+  // Book upload
+  if (rlUploadBtn && rlFileInput) {
+    rlUploadBtn.addEventListener('click', () => rlFileInput.click());
+    rlFileInput.addEventListener('change', async () => {
+      const file = rlFileInput.files[0];
+      if (!file) return;
+      const fd = new FormData();
+      fd.append('file', file);
+      rlUploadBtn.textContent = 'Uploading…';
+      rlUploadBtn.disabled = true;
+      try {
+        const res = await fetch('/api/training/upload-book', { method: 'POST', credentials: 'same-origin', body: fd });
+        const data = await res.json();
+        if (data.ok && rlBookSelect) {
+          const opt = document.createElement('option');
+          opt.value = data.filename; opt.textContent = `${data.filename} (${data.size_mb} MB)`;
+          rlBookSelect.appendChild(opt);
+          rlBookSelect.value = data.filename;
+        }
+      } catch (e) { alert('Upload failed: ' + e); }
+      finally { rlUploadBtn.textContent = 'Upload'; rlUploadBtn.disabled = false; rlFileInput.value = ''; }
+    });
+  }
+
+  // RL start
+  if (rlStartBtn) {
+    let activeRlJobId = null;
+    rlStartBtn.addEventListener('click', async () => {
+      const modelId = _getTrainingField('rl-model-id');
+      const book = rlBookSelect ? rlBookSelect.value : '';
+      if (!modelId) { alert('Please enter a base model ID.'); return; }
+      if (!book) { alert('Please select or upload a book.'); return; }
+      const logEl = body.querySelector('#rl-job-log');
+      const badgeEl = body.querySelector('#rl-job-badge');
+      const statusDiv = body.querySelector('#rl-job-status');
+      const levelBar = body.querySelector('#rl-level-progress');
+      if (statusDiv) statusDiv.style.display = '';
+      if (levelBar) levelBar.style.display = '';
+      if (logEl) logEl.textContent = '';
+      if (badgeEl) { badgeEl.textContent = 'starting…'; badgeEl.style.color = 'var(--fg)'; }
+      rlStartBtn.disabled = true;
+      if (rlStopBtn) rlStopBtn.disabled = false;
+      body.querySelectorAll('.rl-level-pip').forEach(p => p.classList.remove('rl-level-done', 'rl-level-active'));
+      try {
+        const result = await _startTrainingJob({
+          job_type: 'rl_loop',
+          model_id: modelId,
+          book_filename: book,
+          seed: parseInt(_getTrainingField('rl-seed') || '42'),
+          lora_rank: parseInt(_getTrainingField('rl-lora-rank') || '16'),
+          lr: parseFloat(_getTrainingField('rl-lr') || '2e-5'),
+          epochs: parseInt(_getTrainingField('rl-epochs') || '1'),
+          batch_size: 1,
+          grad_accum: 8,
+          output_name: _getTrainingField('rl-output-name') || null,
+        });
+        activeRlJobId = result.job_id;
+        if (badgeEl) { badgeEl.textContent = 'running'; badgeEl.style.color = 'var(--green,#50fa7b)'; }
+        _streamJobLogs(result.job_id, logEl, badgeEl, rlStopBtn);
+      } catch (e) {
+        if (badgeEl) { badgeEl.textContent = 'error'; badgeEl.style.color = 'var(--red)'; }
+        if (logEl) logEl.textContent = String(e);
+        rlStartBtn.disabled = false;
+        if (rlStopBtn) rlStopBtn.disabled = true;
+      }
+    });
+    if (rlStopBtn) {
+      rlStopBtn.addEventListener('click', async () => {
+        const state = await fetch('/api/training/state', { credentials: 'same-origin' }).then(r=>r.json()).catch(()=>({jobs:[]}));
+        const running = (state.jobs||[]).find(j=>j.status==='running');
+        if (running) await _stopTrainingJob(running.id);
+        rlStartBtn.disabled = false;
+        rlStopBtn.disabled = true;
+      });
+    }
+  }
+}
+
 function _renderRecipes() {
   const body = document.querySelector('#cookbook-modal .cookbook-body');
   if (!body) return;
@@ -1777,6 +2060,9 @@ function _renderRecipes() {
   html += '<button class="cookbook-tab" data-backend="Serve"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1"/><circle cx="6" cy="18" r="1"/></svg>Serve</button>';
   html += '<button class="cookbook-tab" data-backend="Dependencies"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>Dependencies</button>';
   html += '<button class="cookbook-tab" data-backend="Settings"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings</button>';
+  html += '<button class="cookbook-tab" data-backend="Train"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>Train</button>';
+  html += '<button class="cookbook-tab" data-backend="QLoRA"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="9" y2="12"/><line x1="15" y1="12" x2="21" y2="12"/></svg>QLoRA</button>';
+  html += '<button class="cookbook-tab" data-backend="RLLoop"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>RL Loop</button>';
   html += '</div>';
 
   // Search group
@@ -2045,10 +2331,97 @@ function _renderRecipes() {
   html += `</div>`;
   html += '</div>';
 
-  html += '</div></div>';
+  html += '</div>';  // end Settings group
+
+  // ── Train group (SFT / DPO / CPT) ────────────────────────────────────
+  html += '<div class="cookbook-group hidden" data-backend-group="Train" style="flex:1;overflow-y:auto;">';
+  html += '<div class="admin-card" style="flex:0 0 auto;">';
+  html += '<h2><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:5px;opacity:0.7"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>Fine-Tuning</h2>';
+  html += '<p class="memory-desc" style="margin-bottom:10px;">Train a model with SFT, DPO, or CPT using QLoRA. Requires TRL, PEFT, and bitsandbytes.<br><code style="font-size:10px">pip install trl peft transformers datasets bitsandbytes</code></p>';
+  // Sub-tabs
+  html += '<div class="cookbook-subtabs" id="train-subtabs">';
+  html += '<button class="cookbook-subtab active" data-train-tab="sft">SFT</button>';
+  html += '<button class="cookbook-subtab" data-train-tab="dpo">DPO</button>';
+  html += '<button class="cookbook-subtab" data-train-tab="cpt">CPT</button>';
+  html += '</div>';
+  // SFT panel
+  html += '<div class="train-subpanel" data-train-panel="sft">';
+  html += '<p class="memory-desc" style="margin:6px 0 8px">Supervised Fine-Tuning: teach instruction following from a labeled dataset.</p>';
+  html += _trainingFormHtml('sft');
+  html += '</div>';
+  // DPO panel
+  html += '<div class="train-subpanel" data-train-panel="dpo" style="display:none">';
+  html += '<p class="memory-desc" style="margin:6px 0 8px">Direct Preference Optimization: align a model to prefer good over bad responses.</p>';
+  html += _trainingFormHtml('dpo');
+  html += '</div>';
+  // CPT panel
+  html += '<div class="train-subpanel" data-train-panel="cpt" style="display:none">';
+  html += '<p class="memory-desc" style="margin:6px 0 8px">Continued Pre-Training: inject raw domain text before instruction tuning.</p>';
+  html += _trainingFormHtml('cpt');
+  html += '</div>';
+  html += '</div>';
+  // Job status
+  html += _trainingStatusHtml('train');
+  html += '</div>';  // end Train group
+
+  // ── QLoRA group ───────────────────────────────────────────────────────
+  html += '<div class="cookbook-group hidden" data-backend-group="QLoRA" style="flex:1;overflow-y:auto;">';
+  html += '<div class="admin-card" style="flex:0 0 auto;">';
+  html += '<h2><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:5px;opacity:0.7"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></svg>QLoRA Merge</h2>';
+  html += '<p class="memory-desc" style="margin-bottom:10px;">Merge a trained LoRA adapter into the base model to produce a single deployable model.</p>';
+  html += '<div class="settings-col" style="gap:8px;">';
+  html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Base Model</label><input type="text" class="memory-search-input" id="qlora-base-model" placeholder="meta-llama/Llama-3.2-1B" style="flex:1"></div>';
+  html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Adapter Path</label><input type="text" class="memory-search-input" id="qlora-adapter-path" placeholder="data/lora_adapters/sft-xxxxx" style="flex:1"></div>';
+  html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Output Name</label><input type="text" class="memory-search-input" id="qlora-output-name" placeholder="my-merged-model" style="flex:1"></div>';
+  html += '</div>';
+  html += '<button class="cookbook-btn" id="qlora-start-btn" style="margin-top:12px;width:100%">Merge Adapter</button>';
+  html += _trainingStatusHtml('qlora');
+  html += '</div>';
+  html += '</div>';  // end QLoRA group
+
+  // ── RL Loop group ─────────────────────────────────────────────────────
+  html += '<div class="cookbook-group hidden" data-backend-group="RLLoop" style="flex:1;overflow-y:auto;">';
+  html += '<div class="admin-card" style="flex:0 0 auto;">';
+  html += '<h2><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:5px;opacity:0.7"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>RL Loop <span style="font-size:10px;opacity:0.55;font-weight:normal;margin-left:4px;">Student → PhD</span></h2>';
+  html += '<p class="memory-desc" style="margin-bottom:10px;">Trains a model to become a knowledge expert on a book using GRPO reinforcement learning. Progresses through 5 curriculum levels: Student → Intermediate → Advanced → Expert → PhD.</p>';
+  html += '<div class="settings-col" style="gap:8px;">';
+  // Model
+  html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Base Model</label><input type="text" class="memory-search-input" id="rl-model-id" placeholder="meta-llama/Llama-3.2-1B" style="flex:1"><button class="cookbook-btn" id="rl-model-pick-btn" style="padding:4px 8px;margin-left:4px;flex-shrink:0" title="Pick from downloaded models">Browse</button></div>';
+  // Book upload
+  html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Book</label><select class="memory-search-input" id="rl-book-select" style="flex:1"><option value="">— select or upload —</option></select><button class="cookbook-btn" id="rl-book-upload-btn" style="padding:4px 8px;margin-left:4px;flex-shrink:0">Upload</button><input type="file" id="rl-book-file-input" accept=".pdf,.epub,.txt,.md" style="display:none"></div>';
+  // Seed
+  html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Seed</label><input type="number" class="memory-search-input" id="rl-seed" value="42" min="0" max="999999" style="width:90px"><span style="opacity:0.5;font-size:11px;margin-left:8px">Reproducibility seed for the training run</span></div>';
+  // Hyperparams (collapsible)
+  html += '<details style="margin-top:4px"><summary style="cursor:pointer;font-size:11px;opacity:0.6;list-style:none;display:flex;align-items:center;gap:4px"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>Hyperparameters</summary>';
+  html += '<div class="settings-col" style="gap:6px;margin-top:8px;">';
+  html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">LoRA Rank</label><input type="number" class="memory-search-input" id="rl-lora-rank" value="16" min="4" max="128" style="width:70px"></div>';
+  html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Learning Rate</label><input type="text" class="memory-search-input" id="rl-lr" value="2e-5" style="width:80px"></div>';
+  html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Epochs/Level</label><input type="number" class="memory-search-input" id="rl-epochs" value="1" min="1" max="10" style="width:70px"></div>';
+  html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Output Name</label><input type="text" class="memory-search-input" id="rl-output-name" placeholder="expert-on-bookname" style="flex:1"></div>';
+  html += '</div></details>';
+  html += '</div>';
+  html += '<div style="display:flex;gap:8px;margin-top:12px;">';
+  html += '<button class="cookbook-btn" id="rl-start-btn" style="flex:1">Start RL Loop</button>';
+  html += '<button class="cookbook-btn" id="rl-stop-btn" style="padding:6px 12px;opacity:0.7" disabled>Stop</button>';
+  html += '</div>';
+  // Progress
+  html += '<div id="rl-level-progress" style="margin-top:10px;display:none">';
+  html += '<div style="font-size:11px;opacity:0.7;margin-bottom:4px">Curriculum Progress</div>';
+  html += '<div class="rl-level-bar">';
+  for (const lvl of ['Student','Intermediate','Advanced','Expert','PhD']) {
+    html += `<div class="rl-level-pip" data-level="${lvl.toLowerCase()}" title="${lvl}">${lvl[0]}</div>`;
+  }
+  html += '</div>';
+  html += '</div>';
+  html += _trainingStatusHtml('rl');
+  html += '</div>';
+  html += '</div>';  // end RLLoop group
+
+  html += '</div>';  // outer cookbook body container
 
   body.innerHTML = html;
   _wireTabEvents(body);
+  _wireTrainingEvents(body);
 
   // Auto-init What Fits
   _hwfitInit();

@@ -666,6 +666,9 @@ app.include_router(setup_shell_routes())
 from routes.cookbook_routes import setup_cookbook_routes
 app.include_router(setup_cookbook_routes())
 
+from routes.training_routes import setup_training_routes
+app.include_router(setup_training_routes())
+
 # Hardware model fitting (cookbook "What Fits?" tab)
 from routes.hwfit_routes import setup_hwfit_routes
 app.include_router(setup_hwfit_routes())
@@ -815,7 +818,10 @@ async def serve_login(request: Request):
 
 @app.get("/command-panel")
 async def serve_command_panel(request: Request):
-    return _serve_html_with_nonce(request, abs_join(BASE_DIR, "static/neuralforge_panel.html"))
+    panel_path = abs_join(BASE_DIR, "static/neuralforge_panel.html")
+    if not os.path.exists(panel_path):
+        raise HTTPException(404, "NeuralForge panel not installed — copy neuralforge_odysseus_command_panel.html body content into static/neuralforge_panel.html")
+    return _serve_html_with_nonce(request, panel_path)
 
 @app.get("/api/version")
 async def get_version():

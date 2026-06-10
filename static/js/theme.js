@@ -29,6 +29,15 @@ export const THEMES = {
                             inputBg: '#2f2f2f' } },
   claude:     { bg:'#262624', fg:'#f5f4f0', panel:'#30302e', border:'#4a4a47', red:'#c6613f' },
   cute:       { bg:'#fff0f5', fg:'#d4608a', panel:'#fff8fa', border:'#f0c0d0', red:'#ff6b9d' },
+  // Community-standard palettes — carefully tuned for visual correctness
+  nord:       { bg:'#2e3440', fg:'#d8dee9', panel:'#242933', border:'#4c566a', red:'#bf616a' },
+  gruvbox:    { bg:'#282828', fg:'#ebdbb2', panel:'#1d2021', border:'#504945', red:'#fb4934' },
+  rosepine:   { bg:'#191724', fg:'#e0def4', panel:'#1f1d2e', border:'#403d52', red:'#eb6f92' },
+  catppuccin: { bg:'#1e1e2e', fg:'#cdd6f4', panel:'#181825', border:'#313244', red:'#f38ba8' },
+  tokyonight: { bg:'#1a1b26', fg:'#a9b1d6', panel:'#16161e', border:'#292e42', red:'#f7768e' },
+  solarized:  { bg:'#002b36', fg:'#93a1a1', panel:'#073642', border:'#586e75', red:'#dc322f' },
+  everforest: { bg:'#2d353b', fg:'#d3c6aa', panel:'#272e33', border:'#4a555b', red:'#e67e80' },
+  ayu:        { bg:'#0d1017', fg:'#bfbdb6', panel:'#0a0e14', border:'#1f2430', red:'#ff8f40' },
 };
 
 const DEFAULT_THEME = 'dark';
@@ -58,6 +67,15 @@ const THEME_DEFAULT_PATTERN = {
   organs:     'rain',
   ume:        'petals',
   cute:       'sparkles',
+  // New themes
+  nord:       'none',
+  gruvbox:    'none',
+  rosepine:   'petals',
+  catppuccin: 'none',
+  tokyonight: 'rain',
+  solarized:  'constellations',
+  everforest: 'petals',
+  ayu:        'none',
 };
 
 // Default effect colors for specific themes (overrides --fg)
@@ -66,6 +84,10 @@ const THEME_DEFAULT_EFFECT_COLOR = {
   organs:     '#451616',
   cute:       '#ff8cb8',
   ume:        '#f5a0c0',
+  rosepine:   '#eb6f92',
+  catppuccin: '#cba6f7',
+  tokyonight: '#7aa2f7',
+  everforest: '#a7c080',
 };
 
 // Default effect intensity (0..1) per theme. Any theme not listed defaults to 1.
@@ -78,6 +100,8 @@ const THEME_DEFAULT_INTENSITY = {
 // Default frosted-glass state per theme. Themes not listed default to false.
 const THEME_DEFAULT_FROSTED = {
   lavender:   true,
+  rosepine:   true,
+  catppuccin: true,
 };
 
 // ── Custom theme persistence ──
