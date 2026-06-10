@@ -12,7 +12,6 @@ Routes (all under /api/ingest):
 """
 
 import asyncio
-import hashlib
 import os
 import re
 import threading
@@ -22,8 +21,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
+
+from src.auth_helpers import require_user
 
 
 # ── Module-level state ────────────────────────────────────────────────────────
@@ -171,17 +172,18 @@ def _process_file(file_entry: Dict, file_bytes: bytes, rag_manager, owner: str):
             file_entry["chunks"] = len(chunks)
 
         if chunks and rag_manager:
-            source_id = hashlib.sha256(name.encode()).hexdigest()[:16]
+            # add_documents_batch expects (text, metadata) pairs and derives its
+            # own deterministic doc ids from text+owner — passing a third element
+            # raises "too many values to unpack" and fails the whole batch.
             docs = []
             for i, chunk in enumerate(chunks):
-                doc_id = f"{source_id}-{i}"
                 meta = {
                     "source": name,
                     "owner": owner,
                     "chunk_id": i,
                     "ingest_source": "cookbook",
                 }
-                docs.append((chunk, meta, doc_id))
+                docs.append((chunk, meta))
 
             total = len(docs)
             batch_size = 20
@@ -190,7 +192,7 @@ def _process_file(file_entry: Dict, file_bytes: bytes, rag_manager, owner: str):
                 if hasattr(rag_manager, "add_documents_batch"):
                     rag_manager.add_documents_batch(batch)
                 else:
-                    for text_chunk, meta, _ in batch:
+                    for text_chunk, meta in batch:
                         rag_manager.add_document(text_chunk, meta)
                 pct = 50 + int(50 * (batch_start + len(batch)) / total)
                 with _state_lock:
@@ -241,12 +243,19 @@ def setup_ingest_routes(rag_manager=None, rag_available: bool = False):
     MAX_FILE_MB = 200
 
     @router.post("/upload")
-    async def ingest_upload(request: Request, files: List[UploadFile] = File(...)):
+    async def ingest_upload(
+        request: Request,
+        files: List[UploadFile] = File(...),
+        owner: str = Depends(require_user),
+    ):
         rm = rag_manager or _get_rag()
         if rm is None:
             raise HTTPException(503, "RAG system unavailable — is ChromaDB running?")
 
-        owner = getattr(request.state, "user", None) or "admin"
+        # `owner` comes from require_user (the canonical request.state.current_user
+        # the auth middleware stamps), so ingested chunks are attributed to the
+        # uploading user — not silently to "admin" as a stale request.state.user
+        # read did. Empty string is the documented single-user/anonymous owner.
 
         if _state["running"]:
             raise HTTPException(409, "Ingest job already running — wait for it to finish")

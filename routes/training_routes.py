@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -19,7 +20,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from core.middleware import require_admin
-from core.platform_compat import find_bash, kill_process_tree, pid_alive, detached_popen_kwargs
+from core.platform_compat import kill_process_tree, pid_alive, detached_popen_kwargs
 from src.constants import DATA_DIR
 
 logger = logging.getLogger(__name__)
@@ -88,8 +89,13 @@ def _build_train_script(req: TrainingRequest, job_id: str, log_path: str) -> lis
     if not script:
         raise ValueError(f"Unknown job type: {req.job_type}")
 
+    # Use the interpreter Odysseus is running under (the venv Python) rather
+    # than a bare "python" off PATH: many hosts only ship python3, and even
+    # where "python" resolves it may be the system interpreter without the
+    # training deps installed. sys.executable bypasses PATH entirely — same
+    # rationale as Cookbook's local serve/scan path.
     cmd = [
-        "python", str(script),
+        sys.executable, str(script),
         "--model-id", req.model_id,
         "--job-id", job_id,
         "--log-file", log_path,
@@ -101,7 +107,10 @@ def _build_train_script(req: TrainingRequest, job_id: str, log_path: str) -> lis
         "--batch-size", str(req.batch_size or 2),
         "--grad-accum", str(req.grad_accum or 4),
     ]
-    if req.dataset_path:
+    # qlora is a merge step (base model + adapter), not a training run, so its
+    # script intentionally has no --dataset flag. Passing it would make argparse
+    # reject the whole invocation and the job would die immediately.
+    if req.dataset_path and req.job_type != "qlora":
         cmd += ["--dataset", req.dataset_path]
     if req.book_filename and req.job_type == "rl_loop":
         book_path = _BOOK_UPLOAD_DIR / req.book_filename
@@ -145,6 +154,13 @@ def setup_training_routes() -> APIRouter:
             if job.get("status") == "running":
                 raise HTTPException(409, "A training job is already running. Stop it first.")
 
+        # Fail fast with a clear message instead of launching a subprocess that
+        # would immediately exit because a required script arg is missing.
+        if body.job_type == "qlora" and not body.base_adapter_path:
+            raise HTTPException(400, "QLoRA merge requires base_adapter_path (the adapter to merge).")
+        if body.job_type == "rl_loop" and not body.book_filename:
+            raise HTTPException(400, "RL Loop requires book_filename (upload a book first).")
+
         job_id = str(uuid.uuid4())[:8]
         log_path = str(_job_log_path(job_id))
 
@@ -152,10 +168,6 @@ def setup_training_routes() -> APIRouter:
             cmd = _build_train_script(body, job_id, log_path)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-
-        bash = find_bash()
-        if not bash:
-            raise HTTPException(500, "bash not found — cannot launch training script")
 
         import subprocess
         kwargs = detached_popen_kwargs()

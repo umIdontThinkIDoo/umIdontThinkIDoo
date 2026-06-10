@@ -434,12 +434,23 @@ async function _submitIngestFiles(body, fileList) {
   const labelEl = body.querySelector('#fg-ingest-overall-label-text');
   if (labelEl) labelEl.textContent = `Uploading ${fileList.length} file(s)…`;
 
-  for (const file of fileList) {
-    const fd = new FormData(); fd.append('file', file);
-    await fetch(`${API}/api/ingest/upload`, { method: 'POST', credentials: 'same-origin', body: fd }).catch(() => {});
+  // The backend /upload endpoint takes the whole batch in one multipart request
+  // under the field name `files` and kicks off the ingest job itself — there is
+  // no separate /start step. Posting files one at a time (or under `file`)
+  // tripped a 422 and a 409 "already running", so nothing got ingested.
+  const fd = new FormData();
+  for (const file of fileList) fd.append('files', file);
+  let res = null;
+  try {
+    res = await fetch(`${API}/api/ingest/upload`, { method: 'POST', credentials: 'same-origin', body: fd });
+  } catch (_) { res = null; }
+  if (res && res.ok) {
+    _startIngestPoll(body);
+  } else {
+    let msg = 'Ingest failed';
+    if (res) { try { msg = (await res.json()).detail || msg; } catch (_) {} }
+    if (labelEl) labelEl.textContent = msg;
   }
-  const startRes = await fetch(`${API}/api/ingest/start`, { method: 'POST', credentials: 'same-origin' }).catch(() => null);
-  if (startRes && startRes.ok) _startIngestPoll(body);
 }
 
 function _buildIngest(body) {
