@@ -3,16 +3,456 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NeuralForge Panel — Odysseus</title>
+  <title>Command Panel — Odysseus</title>
   <link rel="stylesheet" href="/static/style.css">
   <style>
-    body { padding: 16px; background: var(--bg); color: var(--fg); }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: inherit;
+      min-height: 100vh;
+      padding: 24px;
+    }
+    .cp-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .cp-header h1 {
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: -0.3px;
+    }
+    .cp-header .cp-subtitle {
+      font-size: 12px;
+      opacity: 0.5;
+      margin-top: 2px;
+    }
+    .cp-badge {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      padding: 2px 7px;
+      border-radius: 20px;
+      background: color-mix(in srgb, var(--red) 15%, transparent);
+      color: var(--red);
+      border: 1px solid color-mix(in srgb, var(--red) 30%, transparent);
+    }
+    .cp-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 16px;
+    }
+    .cp-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+    }
+    .cp-card h2 {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      opacity: 0.55;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .cp-card h2 svg { opacity: 0.8; flex-shrink: 0; }
+    .cp-stat-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 0;
+      font-size: 13px;
+      border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+    }
+    .cp-stat-row:last-child { border-bottom: none; }
+    .cp-stat-label { opacity: 0.65; }
+    .cp-stat-value { font-weight: 500; font-size: 12px; }
+    .cp-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 20px;
+    }
+    .cp-pill.ok {
+      background: color-mix(in srgb, #50fa7b 12%, transparent);
+      color: #50fa7b;
+    }
+    .cp-pill.err {
+      background: color-mix(in srgb, var(--red) 12%, transparent);
+      color: var(--red);
+    }
+    .cp-pill.idle {
+      background: color-mix(in srgb, var(--fg) 8%, transparent);
+      color: color-mix(in srgb, var(--fg) 55%, transparent);
+    }
+    .cp-pill::before {
+      content: '';
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+    .cp-pill.ok::before { animation: cp-pulse 2s infinite; }
+    @keyframes cp-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+    .cp-job {
+      padding: 10px 12px;
+      border-radius: 7px;
+      background: color-mix(in srgb, var(--fg) 4%, transparent);
+      border: 1px solid var(--border);
+      margin-bottom: 8px;
+      font-size: 12px;
+    }
+    .cp-job:last-child { margin-bottom: 0; }
+    .cp-job-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+    .cp-job-name { font-weight: 600; }
+    .cp-job-meta { opacity: 0.5; font-size: 11px; margin-top: 2px; }
+    .cp-log {
+      font-family: monospace;
+      font-size: 11px;
+      max-height: 120px;
+      overflow-y: auto;
+      background: color-mix(in srgb, var(--fg) 4%, transparent);
+      border-radius: 6px;
+      padding: 8px;
+      line-height: 1.5;
+      margin-top: 8px;
+      color: color-mix(in srgb, var(--fg) 75%, transparent);
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .cp-model-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 220px;
+      overflow-y: auto;
+    }
+    .cp-model-item {
+      padding: 7px 10px;
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--fg) 4%, transparent);
+      border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+      font-size: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .cp-model-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%; }
+    .cp-model-provider { font-size: 10px; opacity: 0.45; text-transform: uppercase; letter-spacing: 0.3px; }
+    .cp-adapter-list { display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow-y: auto; }
+    .cp-adapter-item {
+      padding: 7px 10px;
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--fg) 4%, transparent);
+      border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+      font-size: 12px;
+    }
+    .cp-adapter-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cp-empty {
+      font-size: 12px;
+      opacity: 0.4;
+      text-align: center;
+      padding: 16px 0;
+    }
+    .cp-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .cp-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 14px;
+      border-radius: 7px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: color-mix(in srgb, var(--fg) 6%, transparent);
+      color: var(--fg);
+      text-decoration: none;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .cp-btn:hover {
+      background: color-mix(in srgb, var(--fg) 12%, transparent);
+      border-color: color-mix(in srgb, var(--fg) 30%, transparent);
+    }
+    .cp-btn.primary {
+      background: color-mix(in srgb, var(--red) 18%, transparent);
+      border-color: color-mix(in srgb, var(--red) 40%, transparent);
+      color: var(--red);
+    }
+    .cp-btn.primary:hover {
+      background: color-mix(in srgb, var(--red) 28%, transparent);
+    }
+    .cp-refresh-hint {
+      font-size: 11px;
+      opacity: 0.35;
+      margin-top: 20px;
+      text-align: right;
+    }
+    .cp-spinner {
+      display: inline-block;
+      width: 10px; height: 10px;
+      border: 2px solid color-mix(in srgb, var(--fg) 20%, transparent);
+      border-top-color: var(--fg);
+      border-radius: 50%;
+      animation: cp-spin 0.7s linear infinite;
+    }
+    @keyframes cp-spin { to { transform: rotate(360deg); } }
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--fg) 18%, transparent); border-radius: 4px; }
   </style>
 </head>
 <body>
-  <!-- Paste the body content from neuralforge_odysseus_command_panel.html here,
-       replacing this comment block. Odysseus theme variables (--bg, --fg, --panel,
-       --border, --red, --brand-color, etc.) are available via the loaded style.css. -->
-  <p style="opacity:0.5;font-family:monospace">NeuralForge panel placeholder — replace with panel content.</p>
+  <div class="cp-header">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--red)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+    </svg>
+    <div>
+      <h1>Command Panel</h1>
+      <div class="cp-subtitle">Odysseus Mission Control</div>
+    </div>
+    <div style="flex:1"></div>
+    <span class="cp-badge" id="cp-status-badge">loading</span>
+    <button class="cp-btn" onclick="refresh()" style="padding:5px 10px;">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+      Refresh
+    </button>
+  </div>
+
+  <div class="cp-grid">
+    <!-- System Health -->
+    <div class="cp-card">
+      <h2>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        System
+      </h2>
+      <div id="cp-health-rows">
+        <div class="cp-stat-row"><span class="cp-stat-label">Status</span><span class="cp-spinner"></span></div>
+      </div>
+    </div>
+
+    <!-- Active Training Job -->
+    <div class="cp-card">
+      <h2>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        Active Job
+      </h2>
+      <div id="cp-job-area"><div class="cp-empty">No active training job</div></div>
+    </div>
+
+    <!-- Models -->
+    <div class="cp-card" style="grid-row: span 2;">
+      <h2>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+        Available Models
+      </h2>
+      <div class="cp-model-list" id="cp-model-list">
+        <div class="cp-empty"><span class="cp-spinner"></span></div>
+      </div>
+    </div>
+
+    <!-- LoRA Adapters -->
+    <div class="cp-card">
+      <h2>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+        LoRA Adapters
+      </h2>
+      <div class="cp-adapter-list" id="cp-adapter-list">
+        <div class="cp-empty"><span class="cp-spinner"></span></div>
+      </div>
+    </div>
+
+    <!-- Quick Actions -->
+    <div class="cp-card">
+      <h2>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        Quick Actions
+      </h2>
+      <div class="cp-actions">
+        <a class="cp-btn primary" href="/" target="_parent">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          Chat
+        </a>
+        <button class="cp-btn" onclick="openCookbook()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+          Cookbook
+        </button>
+        <button class="cp-btn" onclick="openSettings()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          Settings
+        </button>
+        <button class="cp-btn" onclick="stopJob()" id="cp-stop-btn" style="display:none; color:var(--red); border-color:color-mix(in srgb, var(--red) 30%, transparent);">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+          Stop Job
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="cp-refresh-hint">Auto-refreshes every 10 seconds</div>
+
+  <script>
+    let _currentJobId = null;
+
+    function openCookbook() {
+      const p = window.parent;
+      if (p && p !== window) {
+        const btn = p.document.querySelector('[data-tab="cookbook"], #cookbook-tab, .cookbook-btn');
+        if (btn) { btn.click(); return; }
+      }
+      window.open('/', '_parent');
+    }
+
+    function openSettings() {
+      const p = window.parent;
+      if (p && p !== window) {
+        const btn = p.document.querySelector('[data-tab="settings"], #settings-btn, .settings-btn');
+        if (btn) { btn.click(); return; }
+      }
+      window.open('/', '_parent');
+    }
+
+    async function fetchHealth() {
+      const rows = document.getElementById('cp-health-rows');
+      try {
+        const [health, ver] = await Promise.all([
+          fetch('/api/health').then(r => r.json()),
+          fetch('/api/version').then(r => r.json()),
+        ]);
+        rows.innerHTML = `
+          <div class="cp-stat-row">
+            <span class="cp-stat-label">API</span>
+            <span class="cp-pill ok">online</span>
+          </div>
+          <div class="cp-stat-row">
+            <span class="cp-stat-label">Version</span>
+            <span class="cp-stat-value">${ver.version || '—'}</span>
+          </div>
+          <div class="cp-stat-row">
+            <span class="cp-stat-label">Auth</span>
+            <span class="cp-stat-value">${health.auth_enabled ? 'enabled' : 'disabled'}</span>
+          </div>
+        `;
+        document.getElementById('cp-status-badge').textContent = 'online';
+        document.getElementById('cp-status-badge').style.cssText = 'background:color-mix(in srgb,#50fa7b 12%,transparent);color:#50fa7b;border-color:color-mix(in srgb,#50fa7b 30%,transparent);';
+      } catch {
+        rows.innerHTML = '<div class="cp-stat-row"><span class="cp-stat-label">Status</span><span class="cp-pill err">unreachable</span></div>';
+        document.getElementById('cp-status-badge').textContent = 'offline';
+      }
+    }
+
+    async function fetchJob() {
+      const area = document.getElementById('cp-job-area');
+      const stopBtn = document.getElementById('cp-stop-btn');
+      try {
+        const state = await fetch('/api/training/state').then(r => r.json());
+        const job = state.active_job;
+        if (!job) {
+          area.innerHTML = '<div class="cp-empty">No active training job</div>';
+          stopBtn.style.display = 'none';
+          _currentJobId = null;
+          return;
+        }
+        _currentJobId = job.job_id;
+        stopBtn.style.display = 'inline-flex';
+        const elapsed = job.started_at
+          ? Math.floor((Date.now() / 1000) - job.started_at) + 's'
+          : '—';
+        let recentLog = '';
+        try {
+          const logText = await fetch(`/api/training/logs/${job.job_id}`).then(r => r.text());
+          const lines = logText.trim().split('\n').filter(Boolean);
+          recentLog = lines.slice(-6).join('\n');
+        } catch {}
+        area.innerHTML = `
+          <div class="cp-job">
+            <div class="cp-job-top">
+              <span class="cp-job-name">${escHtml((job.job_type || 'JOB').toUpperCase())} — ${escHtml(job.job_id)}</span>
+              <span class="cp-pill ok">running</span>
+            </div>
+            <div class="cp-job-meta">Model: ${escHtml(job.model_id || '—')} &nbsp;·&nbsp; Elapsed: ${escHtml(elapsed)}</div>
+            ${recentLog ? `<div class="cp-log">${escHtml(recentLog)}</div>` : ''}
+          </div>
+        `;
+      } catch {
+        area.innerHTML = '<div class="cp-empty">Training API unavailable</div>';
+        stopBtn.style.display = 'none';
+      }
+    }
+
+    async function fetchModels() {
+      const list = document.getElementById('cp-model-list');
+      try {
+        const data = await fetch('/api/models').then(r => r.json());
+        const models = Array.isArray(data) ? data : (data.models || data.data || []);
+        if (!models.length) {
+          list.innerHTML = '<div class="cp-empty">No models configured</div>';
+          return;
+        }
+        list.innerHTML = models.slice(0, 20).map(m => {
+          const name = m.name || m.id || m.model || String(m);
+          const provider = m.provider || m.owned_by || '';
+          return `<div class="cp-model-item">
+            <span class="cp-model-name" title="${escHtml(name)}">${escHtml(name)}</span>
+            ${provider ? `<span class="cp-model-provider">${escHtml(provider)}</span>` : ''}
+          </div>`;
+        }).join('') + (models.length > 20 ? `<div class="cp-empty">+${models.length - 20} more</div>` : '');
+      } catch {
+        list.innerHTML = '<div class="cp-empty">Could not load models</div>';
+      }
+    }
+
+    async function fetchAdapters() {
+      const list = document.getElementById('cp-adapter-list');
+      try {
+        const data = await fetch('/api/training/adapters').then(r => r.json());
+        const adapters = data.adapters || [];
+        if (!adapters.length) {
+          list.innerHTML = '<div class="cp-empty">No adapters trained yet</div>';
+          return;
+        }
+        list.innerHTML = adapters.map(a => {
+          const name = typeof a === 'string' ? a : (a.name || JSON.stringify(a));
+          return `<div class="cp-adapter-item"><div class="cp-adapter-name" title="${escHtml(name)}">${escHtml(name)}</div></div>`;
+        }).join('');
+      } catch {
+        list.innerHTML = '<div class="cp-empty">Adapters API unavailable</div>';
+      }
+    }
+
+    async function stopJob() {
+      if (!_currentJobId) return;
+      try {
+        await fetch(`/api/training/stop/${_currentJobId}`, { method: 'POST' });
+        setTimeout(refresh, 500);
+      } catch {}
+    }
+
+    function escHtml(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    async function refresh() {
+      await Promise.allSettled([fetchHealth(), fetchJob(), fetchModels(), fetchAdapters()]);
+    }
+
+    refresh();
+    setInterval(refresh, 10000);
+  </script>
 </body>
 </html>
