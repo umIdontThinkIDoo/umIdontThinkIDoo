@@ -1762,6 +1762,146 @@ export function _serverEntryHtml(s, i, defaultServer, forceRemote, isNew) {
   return html;
 }
 
+// ── Ingest panel ──────────────────────────────────────────────────────────
+
+let _ingestPollTimer = null;
+
+function _fmtBytes(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+  return (b / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function _renderFileRow(f) {
+  const statusClass = f.status || 'queued';
+  const pct = f.progress || 0;
+  const fillClass = f.status === 'done' ? 'done' : f.status === 'error' ? 'error' : '';
+  const meta = f.error
+    ? `<span style="color:var(--red);font-size:10px;">${f.error}</span>`
+    : `${_fmtBytes(f.size || 0)}${f.chunks ? ' · ' + f.chunks + ' chunks' : ''}`;
+  return `
+    <div class="ingest-file-row" data-ingest-file="${encodeURIComponent(f.name)}">
+      <div class="ingest-file-top">
+        <span class="ingest-file-name" title="${f.name}">${f.name}</span>
+        <span class="ingest-status-label ${statusClass}">${f.status}</span>
+      </div>
+      <div class="ingest-file-meta">${meta}</div>
+      <div class="ingest-file-bar-track" style="margin-top:5px;">
+        <div class="ingest-file-bar-fill ${fillClass}" style="width:${pct}%"></div>
+      </div>
+    </div>`;
+}
+
+function _updateIngestUI(state) {
+  const overall = document.getElementById('ingest-overall');
+  const fileList = document.getElementById('ingest-file-list');
+  const overallBar = document.getElementById('ingest-overall-bar');
+  const overallPct = document.getElementById('ingest-overall-pct');
+  const overallLabel = document.getElementById('ingest-overall-label-text');
+  const statFiles = document.getElementById('ingest-stat-files');
+  const statChunks = document.getElementById('ingest-stat-chunks');
+  if (!overall) return;
+
+  const files = state.files || [];
+  if (!files.length) { overall.style.display = 'none'; fileList.innerHTML = ''; return; }
+
+  overall.style.display = 'block';
+  const pct = state.total_files > 0 ? Math.round((state.done_files / state.total_files) * 100) : 0;
+  overallBar.style.width = pct + '%';
+  overallPct.textContent = pct + '%';
+  overallLabel.textContent = state.running ? 'Ingesting…' : (pct === 100 ? 'Complete' : 'Paused');
+  statFiles.textContent = `${state.done_files}/${state.total_files}`;
+  statChunks.textContent = state.total_chunks || 0;
+
+  fileList.innerHTML = files.map(_renderFileRow).join('');
+}
+
+async function _startIngestPoll() {
+  if (_ingestPollTimer) return;
+  const tick = async () => {
+    try {
+      const s = await fetch('/api/ingest/progress').then(r => r.json());
+      _updateIngestUI(s);
+      if (s.running) _ingestPollTimer = setTimeout(tick, 800);
+      else _ingestPollTimer = null;
+    } catch { _ingestPollTimer = null; }
+  };
+  _ingestPollTimer = setTimeout(tick, 400);
+}
+
+async function _submitIngestFiles(fileList) {
+  if (!fileList.length) return;
+  const fd = new FormData();
+  for (const f of fileList) fd.append('files', f, f.name);
+  try {
+    const res = await fetch('/api/ingest/upload', { method: 'POST', body: fd });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      alert('Ingest error: ' + (err.detail || res.statusText));
+      return;
+    }
+    const data = await res.json();
+    _startIngestPoll();
+    // Fetch immediately to show queued state
+    const s = await fetch('/api/ingest/progress').then(r => r.json());
+    _updateIngestUI(s);
+  } catch (e) {
+    alert('Ingest failed: ' + e.message);
+  }
+}
+
+function _wireIngestEvents(body) {
+  const dropZone   = body.querySelector('#ingest-drop-zone');
+  const fileInput  = body.querySelector('#ingest-file-input');
+  const folderInput= body.querySelector('#ingest-folder-input');
+  const pickFiles  = body.querySelector('#ingest-pick-files');
+  const pickFolder = body.querySelector('#ingest-pick-folder');
+  const clearBtn   = body.querySelector('#ingest-clear-btn');
+  if (!dropZone) return;
+
+  // Click buttons
+  pickFiles.addEventListener('click', () => fileInput.click());
+  pickFolder.addEventListener('click', () => folderInput.click());
+
+  fileInput.addEventListener('change', () => _submitIngestFiles([...fileInput.files]));
+  folderInput.addEventListener('change', () => _submitIngestFiles([...folderInput.files]));
+
+  // Drag & drop
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    const files = [...(e.dataTransfer?.files || [])];
+    if (files.length) _submitIngestFiles(files);
+  });
+  dropZone.addEventListener('click', () => fileInput.click());
+
+  // Clear
+  clearBtn.addEventListener('click', async () => {
+    try {
+      const r = await fetch('/api/ingest/clear-state', { method: 'POST' });
+      if (r.ok) _updateIngestUI({ files: [], running: false, done_files: 0, total_files: 0, total_chunks: 0 });
+      else alert('Cannot clear while job is running');
+    } catch {}
+  });
+
+  // Load RAG stats
+  fetch('/api/ingest/stats').then(r => r.json()).then(s => {
+    const el = document.getElementById('ingest-stat-rag');
+    if (el && s.available) {
+      const total = s.total_documents || s.count || 0;
+      el.innerHTML = `RAG docs: <b>${total}</b>`;
+    }
+  }).catch(() => {});
+
+  // Restore state if job was already running
+  fetch('/api/ingest/progress').then(r => r.json()).then(s => {
+    _updateIngestUI(s);
+    if (s.running) _startIngestPoll();
+  }).catch(() => {});
+}
+
 // ── Training panel helpers ────────────────────────────────────────────────
 
 function _trainingFormHtml(type) {
@@ -2063,6 +2203,7 @@ function _renderRecipes() {
   html += '<button class="cookbook-tab" data-backend="Train"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>Train</button>';
   html += '<button class="cookbook-tab" data-backend="QLoRA"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="9" y2="12"/><line x1="15" y1="12" x2="21" y2="12"/></svg>QLoRA</button>';
   html += '<button class="cookbook-tab" data-backend="RLLoop"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>RL Loop</button>';
+  html += '<button class="cookbook-tab" data-backend="Ingest"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Ingest</button>';
   html += '</div>';
 
   // Search group
@@ -2417,9 +2558,44 @@ function _renderRecipes() {
   html += '</div>';
   html += '</div>';  // end RLLoop group
 
+  // ── Ingest group ──────────────────────────────────────────────────────────
+  html += '<div class="cookbook-group hidden" data-backend-group="Ingest" style="flex:1;overflow-y:auto;">';
+  html += '<div class="admin-card" style="flex:0 0 auto;">';
+  html += '<h2><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:5px;opacity:0.7"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>RAG Ingest</h2>';
+  html += '<p class="memory-desc" style="margin-bottom:10px;">Upload files or folders to index into the RAG knowledge base. Supports PDF, EPUB, TXT, MD, DOCX. Indexed chunks become available in all chats when RAG is enabled.</p>';
+  // Drop zone
+  html += '<div class="ingest-drop-zone" id="ingest-drop-zone">';
+  html += '<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="display:block;margin:0 auto 6px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>';
+  html += '<div class="ingest-drop-label">Drop files here, or use the buttons below</div>';
+  html += '<div class="ingest-drop-hint">PDF, EPUB, TXT, MD, DOCX — up to 200 MB each</div>';
+  html += '</div>';
+  // Action buttons
+  html += '<div class="ingest-actions">';
+  html += '<button class="cookbook-btn" id="ingest-pick-files" style="flex:1"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:4px"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>Pick Files</button>';
+  html += '<button class="cookbook-btn" id="ingest-pick-folder" style="flex:1"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:4px"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Pick Folder</button>';
+  html += '<button class="cookbook-btn" id="ingest-clear-btn" style="opacity:0.6" title="Clear results">Clear</button>';
+  html += '</div>';
+  html += '<input type="file" id="ingest-file-input" multiple accept=".pdf,.epub,.txt,.md,.docx,.rst,.csv" style="display:none">';
+  html += '<input type="file" id="ingest-folder-input" multiple webkitdirectory style="display:none">';
+  // Overall progress
+  html += '<div class="ingest-overall" id="ingest-overall">';
+  html += '<div class="ingest-overall-label"><span id="ingest-overall-label-text">Processing…</span><span id="ingest-overall-pct">0%</span></div>';
+  html += '<div class="ingest-bar-track"><div class="ingest-bar-fill" id="ingest-overall-bar"></div></div>';
+  html += '<div class="ingest-stats-row">';
+  html += '<div class="ingest-stat">Files: <b id="ingest-stat-files">0/0</b></div>';
+  html += '<div class="ingest-stat">Chunks: <b id="ingest-stat-chunks">0</b></div>';
+  html += '<div class="ingest-stat" id="ingest-stat-rag"></div>';
+  html += '</div>';
+  html += '</div>';
+  // File list
+  html += '<div class="ingest-file-list" id="ingest-file-list"></div>';
+  html += '</div>';
+  html += '</div>';  // end Ingest group
+
   body.innerHTML = html;
   _wireTabEvents(body);
   _wireTrainingEvents(body);
+  _wireIngestEvents(body);
 
   // Auto-init What Fits
   _hwfitInit();

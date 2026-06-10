@@ -668,6 +668,8 @@ app.include_router(setup_cookbook_routes())
 
 from routes.training_routes import setup_training_routes
 app.include_router(setup_training_routes())
+from routes.ingest_routes import setup_ingest_routes
+app.include_router(setup_ingest_routes(rag_manager, rag_available))
 
 # Hardware model fitting (cookbook "What Fits?" tab)
 from routes.hwfit_routes import setup_hwfit_routes

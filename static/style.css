@@ -36662,3 +36662,86 @@ body.theme-frosted .modal {
   0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent, var(--red)) 40%, transparent); }
   50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, var(--red)) 0%, transparent); }
 }
+
+/* ── Ingest tab ──────────────────────────────────────────────────────────── */
+.ingest-drop-zone {
+  border: 2px dashed color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 10px;
+  padding: 28px 16px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  margin-bottom: 12px;
+}
+.ingest-drop-zone:hover, .ingest-drop-zone.drag-over {
+  border-color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--accent, var(--red)) 5%, transparent);
+}
+.ingest-drop-zone svg { opacity: 0.4; margin-bottom: 6px; }
+.ingest-drop-label { font-size: 13px; opacity: 0.6; margin-bottom: 4px; }
+.ingest-drop-hint  { font-size: 11px; opacity: 0.35; }
+.ingest-actions { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.ingest-overall {
+  margin-bottom: 14px;
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: none;
+}
+.ingest-overall-label { font-size: 11px; opacity: 0.55; margin-bottom: 6px; display: flex; justify-content: space-between; }
+.ingest-bar-track {
+  height: 6px;
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.ingest-bar-fill {
+  height: 100%;
+  background: var(--accent, var(--red));
+  border-radius: 3px;
+  transition: width 0.3s;
+  width: 0%;
+}
+.ingest-file-list { display: flex; flex-direction: column; gap: 6px; max-height: 340px; overflow-y: auto; }
+.ingest-file-row {
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  font-size: 12px;
+}
+.ingest-file-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; }
+.ingest-file-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%; }
+.ingest-file-meta { font-size: 10px; opacity: 0.45; }
+.ingest-file-bar-track {
+  height: 4px;
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.ingest-file-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s, background 0.2s;
+  width: 0%;
+  background: var(--accent, var(--red));
+}
+.ingest-file-bar-fill.done { background: #50fa7b; }
+.ingest-file-bar-fill.error { background: var(--red); }
+.ingest-status-label {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+}
+.ingest-status-label.queued  { background: color-mix(in srgb,var(--fg) 10%,transparent); opacity:0.5; }
+.ingest-status-label.extracting,.ingest-status-label.chunking,.ingest-status-label.embedding {
+  background: color-mix(in srgb, var(--accent, var(--red)) 15%, transparent);
+  color: var(--accent, var(--red));
+  animation: cp-pulse 1.5s infinite;
+}
+.ingest-status-label.done  { background: color-mix(in srgb,#50fa7b 15%,transparent); color:#50fa7b; }
+.ingest-status-label.error { background: color-mix(in srgb,var(--red) 15%,transparent); color:var(--red); }
+.ingest-stats-row { display: flex; gap: 16px; margin-top: 10px; flex-wrap: wrap; }
+.ingest-stat { font-size: 11px; opacity: 0.55; }
+.ingest-stat b { opacity: 1; font-size: 13px; }
