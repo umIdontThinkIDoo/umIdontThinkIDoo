@@ -225,7 +225,16 @@ def _run_ingest_job(files_data: List[tuple], rag_manager, owner: str):
 
 # ── Route factory ─────────────────────────────────────────────────────────────
 
-def setup_ingest_routes(rag_manager, rag_available: bool):
+def _get_rag():
+    """Get rag_manager at request time so we're not bound to startup state."""
+    try:
+        from src.rag_singleton import get_rag_manager
+        return get_rag_manager()
+    except Exception:
+        return None
+
+
+def setup_ingest_routes(rag_manager=None, rag_available: bool = False):
     router = APIRouter(prefix="/api/ingest", tags=["ingest"])
 
     ALLOWED = {".pdf", ".epub", ".txt", ".md", ".docx", ".rst", ".csv"}
@@ -233,7 +242,8 @@ def setup_ingest_routes(rag_manager, rag_available: bool):
 
     @router.post("/upload")
     async def ingest_upload(request: Request, files: List[UploadFile] = File(...)):
-        if not rag_available or rag_manager is None:
+        rm = rag_manager or _get_rag()
+        if rm is None:
             raise HTTPException(503, "RAG system unavailable — is ChromaDB running?")
 
         owner = getattr(request.state, "user", None) or "admin"
@@ -290,7 +300,7 @@ def setup_ingest_routes(rag_manager, rag_available: bool):
             _state["running"] = bool(files_data)
 
         if files_data:
-            _executor.submit(_run_ingest_job, files_data, rag_manager, owner)
+            _executor.submit(_run_ingest_job, files_data, rm, owner)
 
         return {"job_id": _state["job_id"], "queued": len(files_data), "skipped": len(entries) - len(files_data)}
 
@@ -301,10 +311,11 @@ def setup_ingest_routes(rag_manager, rag_available: bool):
 
     @router.get("/stats")
     async def ingest_stats():
-        if not rag_available or rag_manager is None:
+        rm = rag_manager or _get_rag()
+        if rm is None:
             return {"available": False}
         try:
-            stats = rag_manager.get_stats() if hasattr(rag_manager, "get_stats") else {}
+            stats = rm.get_stats() if hasattr(rm, "get_stats") else {}
             return {"available": True, **stats}
         except Exception as e:
             return {"available": False, "error": str(e)}
