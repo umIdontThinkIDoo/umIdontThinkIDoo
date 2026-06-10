@@ -1,0 +1,50 @@
+{
+  "_comment": "Claude Code MCP server configuration for Odysseus workspace.",
+  "_install": [
+    "Merge the 'mcpServers' block into ~/.claude/settings.json.",
+    "Start Qdrant before using rag-books:",
+    "  docker run -d --name qdrant -p 6333:6333 -v ~/.qdrant:/qdrant/storage qdrant/qdrant",
+    "Ingest coding books once:",
+    "  python scripts/ingest_books.py",
+    "Verify MCPs loaded in Claude Code: /mcp"
+  ],
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/media/dari/Above-Average",
+        "/home/dari"
+      ]
+    },
+    "tavily": {
+      "command": "npx",
+      "args": ["-y", "tavily-mcp"],
+      "env": {
+        "TAVILY_API_KEY": "YOUR_TAVILY_API_KEY"
+      }
+    },
+    "rag-books": {
+      "command": "uvx",
+      "args": ["mcp-server-qdrant"],
+      "env": {
+        "QDRANT_URL": "http://localhost:6333",
+        "COLLECTION_NAME": "coding_books",
+        "FASTEMBED_MODEL": "sentence-transformers/all-MiniLM-L6-v2"
+      }
+    },
+    "gemini": {
+      "command": "npx",
+      "args": ["-y", "@google/generative-ai-mcp"],
+      "env": {
+        "GOOGLE_API_KEY": "YOUR_GOOGLE_API_KEY"
+      }
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"]
+    }
+  },
+  "autoCompactEnabled": true
+}

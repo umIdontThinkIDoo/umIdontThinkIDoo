@@ -1,0 +1,17 @@
+# Copy to ~/.local/share/applications/odysseus.desktop, then run:
+#   chmod +x /media/dari/Above-Average/odysseus/scripts/launch-odysseus.sh
+#   update-desktop-database ~/.local/share/applications/
+#
+# If your install path differs from /media/dari/Above-Average/odysseus,
+# update the Exec= and Icon= lines below.
+
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Odysseus
+Comment=AI assistant stack (NVIDIA GPU)
+Exec=/media/dari/Above-Average/odysseus/scripts/launch-odysseus.sh
+Icon=/media/dari/Above-Average/odysseus/static/favicon.svg
+Terminal=false
+Categories=Network;AI;
+StartupNotify=true
