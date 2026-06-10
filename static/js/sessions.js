@@ -2741,7 +2741,7 @@ export function openLibrary(defaultTab) {
       for (const sid of _lib.selected) await fetch(`${API_BASE}/api/session/${sid}/archive`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
       uiModule.showToast(`Archived ${_lib.selected.size} sessions`);
     } else if (_lib.tab === 'archive') {
-      for (const sid of _lib.selected) await fetch(`${API_BASE}/api/session/${sid}/restore`, { method: 'POST' });
+      for (const sid of _lib.selected) await fetch(`${API_BASE}/api/session/${sid}/unarchive`, { method: 'POST' });
       uiModule.showToast(`Restored ${_lib.selected.size} sessions`);
     }
     _lib.selected.clear();
@@ -2847,7 +2847,7 @@ async function _renderLibArchive(grid) {
       card.querySelector('.archive-menu-btn').addEventListener('click', (e) => {
         e.stopPropagation();
         _showDropdown(e.currentTarget, [
-          { label: 'Restore', action: async () => { await fetch(`${API_BASE}/api/session/${s.id}/restore`, { method: 'POST' }); await loadSessions(); _renderLibGrid(); } },
+          { label: 'Restore', action: async () => { await fetch(`${API_BASE}/api/session/${s.id}/unarchive`, { method: 'POST' }); await loadSessions(); _renderLibGrid(); } },
           { label: 'Delete', action: async () => { if (!await uiModule.styledConfirm('Delete?', { confirmText: 'Delete', danger: true })) return; await fetch(`${API_BASE}/api/session/${s.id}`, { method: 'DELETE' }); _renderLibGrid(); }, danger: true },
         ]);
       });

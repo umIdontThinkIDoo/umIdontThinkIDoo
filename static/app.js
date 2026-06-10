@@ -1412,17 +1412,22 @@ function initializeEventListeners() {
       }
       
       try {
-        const response = await fetch(`${API_BASE}/api/ai/name`, {
-          method: 'POST',
+        // Persist via the generic per-user prefs store (PUT /api/prefs/{key}).
+        // The old /api/ai/name route never existed on the backend, so saving
+        // silently 404'd. The prefs store returns {key, value}.
+        const response = await fetch(`${API_BASE}/api/prefs/ai_name`, {
+          method: 'PUT',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ name: newName })
+          body: JSON.stringify({ value: newName })
         });
-        
-        const result = await response.json();
-        if (result.success) {
+
+        const result = await response.json().catch(() => ({}));
+        if (response.ok && result.value === newName) {
           uiModule.showToast(`AI renamed to ${newName}`);
           renameAiModal.classList.add('hidden');
           aiNameInput.value = '';
+        } else {
+          uiModule.showError('Failed to rename AI');
         }
       } catch (e) {
         uiModule.showError('Failed to rename AI: ' + e.message);
