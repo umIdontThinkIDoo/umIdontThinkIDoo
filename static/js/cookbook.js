@@ -2329,8 +2329,7 @@ function _renderRecipes() {
     html += _serverEntryHtml(_es.servers[i], i, _es.defaultServer || '', false);
   }
   html += `</div>`;
-  html += '</div>';
-
+  html += '</div>';  // end Servers admin-card
   html += '</div>';  // end Settings group
 
   // ── Train group (SFT / DPO / CPT) ────────────────────────────────────
