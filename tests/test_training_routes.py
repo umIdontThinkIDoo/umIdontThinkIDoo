@@ -118,3 +118,146 @@ def test_start_launches_with_venv_interpreter(client, monkeypatch):
     state = client.get("/api/training/state", headers=_ADMIN).json()
     assert state["jobs"][0]["status"] == "running"
     assert state["jobs"][0]["model_id"] == "demo"
+
+
+# ------------------------------ per-GPU job lock ----------------------------
+
+@pytest.fixture
+def launcher(client, monkeypatch):
+    """Client plus a fake Popen that records each launch's env. pid_alive is
+    forced True so started jobs stay 'running' for the conflict checks."""
+    launches = []
+
+    class _FakeProc:
+        pid = 5000
+
+    def _fake_popen(cmd, *a, **k):
+        launches.append({"cmd": cmd, "env": k.get("env")})
+        return _FakeProc()
+
+    monkeypatch.setattr("subprocess.Popen", _fake_popen)
+    monkeypatch.setattr(tr, "pid_alive", lambda pid: True)
+
+    def start(gpu=None):
+        return client.post(
+            "/api/training/start",
+            json={"job_type": "sft", "model_id": "m", "gpu": gpu},
+            headers=_ADMIN,
+        )
+
+    return start, launches
+
+
+def test_pinned_start_sets_cuda_visible_devices(launcher):
+    start, launches = launcher
+    assert start(gpu=1).status_code == 200
+    assert launches[0]["env"]["CUDA_VISIBLE_DEVICES"] == "1"
+
+
+def test_unpinned_start_inherits_parent_gpu_visibility(launcher):
+    """gpu=None must not invent a CUDA_VISIBLE_DEVICES value — the job spans
+    whatever the parent process can see."""
+    import os
+    start, launches = launcher
+    assert start(gpu=None).status_code == 200
+    assert launches[0]["env"].get("CUDA_VISIBLE_DEVICES") == os.environ.get("CUDA_VISIBLE_DEVICES")
+
+
+def test_same_gpu_start_conflicts_409(launcher):
+    start, _ = launcher
+    assert start(gpu=0).status_code == 200
+    r = start(gpu=0)
+    assert r.status_code == 409
+    assert "GPU 0" in r.json()["detail"]
+
+
+def test_different_gpus_run_concurrently(launcher, client):
+    start, launches = launcher
+    assert start(gpu=0).status_code == 200
+    assert start(gpu=1).status_code == 200
+    assert len(launches) == 2
+    state = client.get("/api/training/state", headers=_ADMIN).json()
+    assert [j["status"] for j in state["jobs"]] == ["running", "running"]
+
+
+def test_all_gpu_job_blocks_pinned_start(launcher):
+    start, _ = launcher
+    assert start(gpu=None).status_code == 200
+    r = start(gpu=0)
+    assert r.status_code == 409
+    assert "all GPUs" in r.json()["detail"]
+
+
+def test_pinned_job_blocks_all_gpu_start(launcher):
+    start, _ = launcher
+    assert start(gpu=1).status_code == 200
+    assert start(gpu=None).status_code == 409
+
+
+# ---------------------------- stale-job reaping -----------------------------
+
+def _flip_pid_alive_dead(monkeypatch):
+    monkeypatch.setattr(tr, "pid_alive", lambda pid: False)
+
+
+def test_dead_job_without_marker_is_reaped_to_error_and_unblocks_start(
+        launcher, client, monkeypatch, tmp_path):
+    """A crashed job (dead pid, no [TRAINING_OK] in its log) must not hold the
+    GPU lock forever: /start itself refreshes liveness, flips the job to
+    'error', and lets the new job through."""
+    start, _ = launcher
+    old_id = start(gpu=0).json()["job_id"]
+    (tmp_path / "training_logs" / f"{old_id}.log").write_text("Traceback ...")
+
+    _flip_pid_alive_dead(monkeypatch)
+    r = start(gpu=0)
+    assert r.status_code == 200, r.text
+
+    jobs = {j["id"]: j for j in tr._load_state()["jobs"]}
+    assert jobs[old_id]["status"] == "error"
+    assert jobs[r.json()["job_id"]]["status"] == "running"
+
+
+def test_dead_job_with_ok_marker_is_reaped_to_done(launcher, client, monkeypatch, tmp_path):
+    start, _ = launcher
+    old_id = start(gpu=0).json()["job_id"]
+    (tmp_path / "training_logs" / f"{old_id}.log").write_text("...\n[TRAINING_OK]\n")
+
+    _flip_pid_alive_dead(monkeypatch)
+    state = client.get("/api/training/state", headers=_ADMIN).json()
+    assert {j["id"]: j["status"] for j in state["jobs"]}[old_id] == "done"
+
+
+def test_dead_job_without_log_is_reaped_to_error(launcher, client, monkeypatch):
+    start, _ = launcher
+    old_id = start(gpu=0).json()["job_id"]
+
+    _flip_pid_alive_dead(monkeypatch)
+    state = client.get("/api/training/state", headers=_ADMIN).json()
+    assert {j["id"]: j["status"] for j in state["jobs"]}[old_id] == "error"
+
+
+# -------------------------------- GET /gpus ---------------------------------
+
+def test_gpus_endpoint_parses_nvidia_smi_csv(client, monkeypatch):
+    class _Out:
+        returncode = 0
+        stdout = (
+            "0, NVIDIA GeForce RTX 4060, 8188, 8.9\n"
+            "1, Tesla P100-PCIE-16GB, 16276, 6.0\n"
+        )
+
+    monkeypatch.setattr(tr.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: _Out())
+
+    gpus = client.get("/api/training/gpus", headers=_ADMIN).json()["gpus"]
+    assert [g["index"] for g in gpus] == [0, 1]
+    # bf16 needs Ampere+ (cc 8.0+); Pascal (6.0) must read as fp16-only.
+    assert gpus[0]["bf16"] is True
+    assert gpus[1]["bf16"] is False
+    assert gpus[1]["memory_mb"] == 16276
+
+
+def test_gpus_endpoint_degrades_to_empty_without_nvidia_smi(client, monkeypatch):
+    monkeypatch.setattr(tr.shutil, "which", lambda name: None)
+    assert client.get("/api/training/gpus", headers=_ADMIN).json() == {"gpus": []}

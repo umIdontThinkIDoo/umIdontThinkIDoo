@@ -47,6 +47,11 @@ class TrainingRequest(BaseModel):
     grad_accum: Optional[int] = 4
     base_adapter_path: Optional[str] = None  # for qlora merge
     output_name: Optional[str] = None
+    # Which physical GPU to pin this job to (0, 1, ...). None = let the job span
+    # all visible GPUs (device_map="auto"). On a heterogeneous box (e.g. a fast
+    # Ada card + a slow Pascal card) you want per-GPU jobs, so the launcher sets
+    # CUDA_VISIBLE_DEVICES=<gpu> and only this one card is visible to the run.
+    gpu: Optional[int] = None
 
 
 def _load_state() -> dict:
@@ -122,14 +127,76 @@ def _build_train_script(req: TrainingRequest, job_id: str, log_path: str) -> lis
     return cmd
 
 
+def _gpu_env(gpu: Optional[int]) -> dict:
+    """Subprocess env that pins the job to one physical GPU.
+
+    Inherits the parent env (so the venv interpreter still finds its deps) and
+    overlays CUDA_VISIBLE_DEVICES=<gpu>. With a single device visible, the
+    scripts' device_map="auto" / get_device_name(0) all target that one card —
+    which is exactly the per-GPU-job model on a heterogeneous box. gpu=None
+    leaves CUDA_VISIBLE_DEVICES untouched (job may span all GPUs).
+    """
+    env = os.environ.copy()
+    if gpu is not None:
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    return env
+
+
+def _list_gpus() -> list[dict]:
+    """Enumerate NVIDIA GPUs via nvidia-smi (no torch dependency).
+
+    Returns [] if nvidia-smi is absent or errors, so the UI degrades to "no GPU
+    selector" rather than 500ing. compute_cap lets the UI warn about Pascal
+    (<7.0: no bf16, Unsloth unsupported — but QLoRA/fp16 still works).
+    """
+    import subprocess
+    smi = shutil.which("nvidia-smi")
+    if not smi:
+        return []
+    try:
+        out = subprocess.run(
+            [smi, "--query-gpu=index,name,memory.total,compute_cap",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return []
+    if out.returncode != 0:
+        return []
+    gpus = []
+    for line in out.stdout.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 4:
+            continue
+        idx, name, mem, cc = parts[0], parts[1], parts[2], parts[3]
+        try:
+            gpus.append({
+                "index": int(idx),
+                "name": name,
+                "memory_mb": int(float(mem)),
+                "compute_cap": cc,
+                "bf16": float(cc) >= 8.0,   # bf16 needs Ampere+ (cc 8.0+)
+            })
+        except ValueError:
+            continue
+    return gpus
+
+
 def setup_training_routes() -> APIRouter:
     router = APIRouter(prefix="/api/training", tags=["training"])
 
-    @router.get("/state")
-    async def get_training_state(request: Request):
+    @router.get("/gpus")
+    async def list_gpus(request: Request):
         require_admin(request)
-        state = _load_state()
-        # Refresh live pid status
+        return {"gpus": _list_gpus()}
+
+    def _refresh_job_liveness(state: dict) -> None:
+        """Mark 'running' jobs whose pid is gone as done/error (by log marker).
+
+        Every reader of the running-jobs list must do this first — otherwise a
+        job that crashed (or died with the machine) stays 'running' in the
+        state file forever and blocks new starts with a phantom 409.
+        """
         for job in state.get("jobs", []):
             if job.get("status") == "running":
                 pid = job.get("pid")
@@ -141,6 +208,12 @@ def setup_training_routes() -> APIRouter:
                         job["status"] = "done" if "[TRAINING_OK]" in text else "error"
                     else:
                         job["status"] = "error"
+
+    @router.get("/state")
+    async def get_training_state(request: Request):
+        require_admin(request)
+        state = _load_state()
+        _refresh_job_liveness(state)
         _save_state(state)
         return state
 
@@ -148,11 +221,24 @@ def setup_training_routes() -> APIRouter:
     async def start_training(request: Request, body: TrainingRequest):
         require_admin(request)
         state = _load_state()
+        _refresh_job_liveness(state)
 
-        # Prevent concurrent jobs (GPU memory)
+        # Prevent jobs that would contend for the same GPU. Per-GPU independent
+        # jobs are allowed (e.g. a QLoRA run on GPU 1 while a small SFT runs on
+        # GPU 0). A job that pins no GPU (gpu=None) spans all cards, so it
+        # conflicts with anything; a pinned job conflicts only with a job on the
+        # same card or with an all-GPU job.
         for job in state.get("jobs", []):
-            if job.get("status") == "running":
-                raise HTTPException(409, "A training job is already running. Stop it first.")
+            if job.get("status") != "running":
+                continue
+            running_gpu = job.get("gpu")
+            if body.gpu is None or running_gpu is None or running_gpu == body.gpu:
+                where = "all GPUs" if running_gpu is None else f"GPU {running_gpu}"
+                raise HTTPException(
+                    409,
+                    f"A training job is already running on {where}. "
+                    "Stop it first, or pin this job to a free GPU.",
+                )
 
         # Fail fast with a clear message instead of launching a subprocess that
         # would immediately exit because a required script arg is missing.
@@ -176,6 +262,7 @@ def setup_training_routes() -> APIRouter:
                 cmd,
                 stdout=open(log_path, "w"),
                 stderr=subprocess.STDOUT,
+                env=_gpu_env(body.gpu),
                 **kwargs,
             )
         except Exception as exc:
@@ -187,6 +274,7 @@ def setup_training_routes() -> APIRouter:
             "model_id": body.model_id,
             "status": "running",
             "pid": proc.pid,
+            "gpu": body.gpu,
             "config": body.model_dump(),
         }
         state.setdefault("jobs", []).insert(0, job)

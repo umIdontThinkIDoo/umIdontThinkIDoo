@@ -16,6 +16,7 @@ function _trainFormHtml(type) {
   h += `<div class="settings-row"><label class="settings-label" style="min-width:110px">Base Model</label><input type="text" class="memory-search-input" id="fg-${type}-model-id" placeholder="meta-llama/Llama-3.2-1B" style="flex:1"></div>`;
   h += `<div class="settings-row"><label class="settings-label" style="min-width:110px">Dataset</label><input type="text" class="memory-search-input" id="fg-${type}-dataset" placeholder="HF dataset id or local JSONL path" style="flex:1"></div>`;
   h += `<div class="settings-row"><label class="settings-label" style="min-width:110px">Output Name</label><input type="text" class="memory-search-input" id="fg-${type}-output-name" placeholder="${type}-adapter" style="flex:1"></div>`;
+  h += _gpuRow(type);
   h += '<details style="margin-top:2px"><summary style="cursor:pointer;font-size:11px;opacity:0.6;list-style:none;display:flex;align-items:center;gap:4px"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>Hyperparameters</summary>';
   h += '<div class="settings-col" style="gap:6px;margin-top:8px;">';
   h += `<div class="settings-row"><label class="settings-label" style="min-width:110px">LoRA Rank</label><input type="number" class="memory-search-input" id="fg-${type}-lora-rank" value="16" min="4" max="128" style="width:70px"></div>`;
@@ -42,6 +43,46 @@ function _statusHtml(prefix) {
 function _field(id) {
   const el = document.getElementById(id);
   return el ? el.value.trim() : '';
+}
+
+// ── GPU selector ──────────────────────────────────────────────────────────────
+// On a heterogeneous box you want to pin each job to one card (per-GPU
+// independent jobs) rather than spanning all of them. The row is populated from
+// /api/training/gpus; it degrades to an Auto-only select if nvidia-smi is absent.
+function _gpuRow(idBase) {
+  return `<div class="settings-row"><label class="settings-label" style="min-width:110px">GPU</label>`
+    + `<select class="memory-search-input fg-gpu-select" id="fg-${idBase}-gpu" style="flex:1">`
+    + `<option value="">Auto (all GPUs)</option></select></div>`;
+}
+
+// Returns the chosen GPU index as a number, or null for "Auto".
+function _gpuVal(idBase) {
+  const el = document.getElementById(`fg-${idBase}-gpu`);
+  if (!el || el.value === '') return null;
+  const n = parseInt(el.value, 10);
+  return Number.isNaN(n) ? null : n;
+}
+
+let _gpuCache = null;
+async function _populateGpuSelects(root) {
+  try {
+    if (!_gpuCache) {
+      const r = await fetch(`${API}/api/training/gpus`, { credentials: 'same-origin' });
+      _gpuCache = r.ok ? ((await r.json()).gpus || []) : [];
+    }
+    (root || document).querySelectorAll('select.fg-gpu-select').forEach(sel => {
+      if (sel.dataset.filled === '1') return;
+      for (const g of _gpuCache) {
+        const gb = Math.round((g.memory_mb || 0) / 1024);
+        const warn = g.bf16 ? '' : ' · fp16-only';
+        const opt = document.createElement('option');
+        opt.value = String(g.index);
+        opt.textContent = `GPU ${g.index}: ${g.name} (${gb}GB${warn})`;
+        sel.appendChild(opt);
+      }
+      sel.dataset.filled = '1';
+    });
+  } catch (_) { /* leave Auto-only */ }
 }
 
 let _pollers = {};
@@ -121,6 +162,7 @@ function _wireTrainBtn(type, body) {
         epochs: parseInt(_field(`fg-${type}-epochs`) || '3'),
         batch_size: parseInt(_field(`fg-${type}-batch-size`) || '2'),
         output_name: _field(`fg-${type}-output-name`) || null,
+        gpu: _gpuVal(type),
       });
       if (badgeEl) { badgeEl.textContent = 'running'; badgeEl.style.color = 'var(--green,#50fa7b)'; }
       if (stopBtn) { stopBtn.disabled = false; stopBtn.onclick = () => _stopJob(result.job_id); }
@@ -194,6 +236,7 @@ function _buildTrain(body) {
   html += _statusHtml('fg-train');
   html += '</div>';
   body.innerHTML = html;
+  _populateGpuSelects(body);
 
   body.querySelectorAll('.cookbook-subtab[data-fg-train-tab]').forEach(tab => {
     tab.addEventListener('click', () => {
@@ -222,11 +265,13 @@ function _buildQLoRA(body) {
   html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Base Model</label><input type="text" class="memory-search-input" id="fg-qlora-base-model" placeholder="meta-llama/Llama-3.2-1B" style="flex:1"></div>';
   html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Adapter Path</label><input type="text" class="memory-search-input" id="fg-qlora-adapter-path" placeholder="data/lora_adapters/sft-xxxxx" style="flex:1"></div>';
   html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Output Name</label><input type="text" class="memory-search-input" id="fg-qlora-output-name" placeholder="my-merged-model" style="flex:1"></div>';
+  html += _gpuRow('qlora');
   html += '</div>';
   html += '<button class="cookbook-btn" id="fg-qlora-start-btn" style="margin-top:12px;width:100%">Merge Adapter</button>';
   html += _statusHtml('fg-qlora');
   html += '</div>';
   body.innerHTML = html;
+  _populateGpuSelects(body);
 
   const btn = body.querySelector('#fg-qlora-start-btn');
   const logEl   = body.querySelector('#fg-qlora-job-log');
@@ -248,6 +293,7 @@ function _buildQLoRA(body) {
         model_id: modelId,
         adapter_path: adapterPath,
         output_name: _field('fg-qlora-output-name') || null,
+        gpu: _gpuVal('qlora'),
       });
       if (badgeEl) { badgeEl.textContent = 'running'; badgeEl.style.color = 'var(--green,#50fa7b)'; }
       if (stopBtn) { stopBtn.disabled = false; stopBtn.onclick = () => _stopJob(result.job_id); }
@@ -274,6 +320,7 @@ function _buildRLLoop(body) {
   html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Base Model</label><input type="text" class="memory-search-input" id="fg-rl-model-id" placeholder="meta-llama/Llama-3.2-1B" style="flex:1"><button class="cookbook-btn" id="fg-rl-model-pick-btn" style="padding:4px 8px;margin-left:4px;flex-shrink:0" title="Browse downloaded models">Browse</button></div>';
   html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Book</label><select class="memory-search-input" id="fg-rl-book-select" style="flex:1"><option value="">— select or upload —</option></select><button class="cookbook-btn" id="fg-rl-book-upload-btn" style="padding:4px 8px;margin-left:4px;flex-shrink:0">Upload</button><input type="file" id="fg-rl-book-file-input" accept=".pdf,.epub,.txt,.md" style="display:none"></div>';
   html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">Seed</label><input type="number" class="memory-search-input" id="fg-rl-seed" value="42" min="0" max="999999" style="width:90px"><span style="opacity:0.5;font-size:11px;margin-left:8px">Reproducibility seed</span></div>';
+  html += _gpuRow('rl');
   html += '<details style="margin-top:4px"><summary style="cursor:pointer;font-size:11px;opacity:0.6;list-style:none;display:flex;align-items:center;gap:4px"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>Hyperparameters</summary>';
   html += '<div class="settings-col" style="gap:6px;margin-top:8px;">';
   html += '<div class="settings-row"><label class="settings-label" style="min-width:110px">LoRA Rank</label><input type="number" class="memory-search-input" id="fg-rl-lora-rank" value="16" min="4" max="128" style="width:70px"></div>';
@@ -296,6 +343,7 @@ function _buildRLLoop(body) {
   html += _statusHtml('fg-rl');
   html += '</div>';
   body.innerHTML = html;
+  _populateGpuSelects(body);
 
   const rlBookSelect = body.querySelector('#fg-rl-book-select');
   const rlUploadBtn  = body.querySelector('#fg-rl-book-upload-btn');
@@ -356,6 +404,7 @@ function _buildRLLoop(body) {
         epochs: parseInt(_field('fg-rl-epochs') || '1'),
         batch_size: 1, grad_accum: 8,
         output_name: _field('fg-rl-output-name') || null,
+        gpu: _gpuVal('rl'),
       });
       if (badgeEl) { badgeEl.textContent = 'running'; badgeEl.style.color = 'var(--green,#50fa7b)'; }
       _streamLogs(result.job_id, logEl, badgeEl, rlStopBtn);
