@@ -572,13 +572,15 @@ function _buildPersonalizer(body) {
     chatEl.scrollTop = chatEl.scrollHeight;
   }
 
-  async function _saveMemory(content, category) {
+  async function _saveMemory(content, category, source) {
     try {
+      // The /api/memory/add route requires a `text` field (MemoryAddRequest.text);
+      // sending `content` 422s and the interview would silently save nothing.
       await fetch(`${API}/api/memory/add`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
-        body: JSON.stringify({ content, category: category || 'identity', source: 'personalizer' }),
+        body: JSON.stringify({ text: content, category: category || 'identity', source: source || 'personalizer' }),
       });
     } catch (_) {}
   }
@@ -619,33 +621,29 @@ function _buildPersonalizer(body) {
   mineBtn.addEventListener('click', async () => {
     mineBtn.disabled = true;
     mineBtn.textContent = 'Mining…';
-    _addMsg('assistant', 'Mining your past chats for facts about you…');
+    _addMsg('assistant', 'Mining your recent chats for facts about you…');
     try {
       const sessRes = await fetch(`${API}/api/sessions`, { credentials: 'same-origin' }).then(r=>r.json());
       const sessions = Array.isArray(sessRes) ? sessRes : (sessRes.sessions || []);
-      const sids = sessions.slice(0, 30).map(s => s.id);
-      let allText = '';
+      const sids = sessions.slice(0, 10).map(s => s.id).filter(Boolean);
+      // /api/memory/extract works per-session: it takes a `session` form field,
+      // returns {suggestions: [...]}, and does NOT persist. So extract per
+      // session, then save each suggestion via _saveMemory. (The old code posted
+      // free text as JSON and read .memories — it 422'd and saved nothing.)
+      const found = [];
       for (const sid of sids) {
         try {
-          const hist = await fetch(`${API}/api/history/${sid}`, { credentials: 'same-origin' }).then(r=>r.json());
-          const msgs = Array.isArray(hist) ? hist : (hist.messages || hist.history || []);
-          for (const m of msgs) {
-            if ((m.role || m.type) === 'user') {
-              const content = typeof m.content === 'string' ? m.content : (m.content?.[0]?.text || '');
-              allText += content.slice(0, 400) + '\n';
-            }
+          const fd = new FormData(); fd.append('session', sid);
+          const res = await fetch(`${API}/api/memory/extract`, { method: 'POST', credentials: 'same-origin', body: fd });
+          if (!res.ok) continue;
+          const data = await res.json();
+          for (const s of (data.suggestions || [])) {
+            if (s && !found.includes(s)) { found.push(s); await _saveMemory(s, 'fact', 'personalizer-mining'); }
           }
         } catch (_) {}
       }
-      const extractRes = await fetch(`${API}/api/memory/extract`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ text: allText.slice(0, 8000), source: 'personalizer-mining' }),
-      }).then(r=>r.json()).catch(()=>({ memories: [] }));
-      const found = extractRes.memories || extractRes.facts || [];
       if (found.length) {
-        _addMsg('assistant', `Found ${found.length} fact(s) about you from your chat history:\n\n${found.slice(0,10).map(f=>typeof f==='string'?`• ${f}`:(`• ${f.content||f.text||JSON.stringify(f)}`)).join('\n')}\n\nAll saved to memory.`);
+        _addMsg('assistant', `Found and saved ${found.length} fact(s) from your recent chats:\n\n${found.slice(0,10).map(f=>`• ${f}`).join('\n')}`);
       } else {
         _addMsg('assistant', 'No new facts found in your recent chats. Try the interview instead!');
       }
@@ -852,14 +850,18 @@ function _init() {
     if (!document.getElementById(m.id)) {
       _makeModal(m.id, m.title, m.icon);
     }
-    const railBtn = document.getElementById(m.railId);
-    if (railBtn) {
-      railBtn.addEventListener('click', () => {
-        if (Modals.isMinimized(m.id)) { Modals.restore(m.id); return; }
-        const modal = document.getElementById(m.id);
-        if (modal && !modal.classList.contains('hidden')) { Modals.minimize(m.id); return; }
-        m.open();
-      });
+    const toggle = () => {
+      if (Modals.isMinimized(m.id)) { Modals.restore(m.id); return; }
+      const modal = document.getElementById(m.id);
+      if (modal && !modal.classList.contains('hidden')) { Modals.minimize(m.id); return; }
+      m.open();
+    };
+    // Wire both entry points: the icon rail (only visible with the sidebar
+    // collapsed) and the always-visible "Forge" section in the sidebar.
+    const sbId = m.railId.replace(/^rail-forge-/, 'forge-sb-');
+    for (const btnId of [m.railId, sbId]) {
+      const btn = document.getElementById(btnId);
+      if (btn) btn.addEventListener('click', toggle);
     }
   }
 }
