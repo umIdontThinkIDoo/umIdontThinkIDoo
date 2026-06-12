@@ -104,9 +104,22 @@ def pid_alive(pid: Optional[int]) -> bool:
             kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
-        return True
     except (OSError, ProcessLookupError):
         return False
+    # kill(0) also answers for zombies. A zombie is a *finished* process whose
+    # parent hasn't wait()ed yet (e.g. a crashed training job whose Popen was
+    # dropped without wait); every caller of this helper asks "is the job still
+    # running", so a zombie must read as dead — otherwise the job stays
+    # 'running' in state files until the app restarts. /proc is Linux-only;
+    # elsewhere we keep the plain kill(0) answer.
+    try:
+        with open(f"/proc/{int(pid)}/stat", "r", encoding="ascii", errors="replace") as f:
+            stat = f.read()
+        # State is the first field after the parenthesized comm (which may
+        # itself contain spaces/parens — split after the LAST ')').
+        return stat.rpartition(")")[2].split()[0] != "Z"
+    except (OSError, IndexError, ValueError):
+        return True
 
 
 def kill_process_tree(pid: Optional[int]) -> None:

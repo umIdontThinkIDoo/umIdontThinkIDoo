@@ -301,3 +301,47 @@ def test_run_ssh_command_uses_built_argv(monkeypatch):
     assert captured["kwargs"]["timeout"] == 7
     assert captured["kwargs"]["capture_output"] is True
     assert captured["kwargs"]["text"] is False
+
+
+# --------------------------------- pid_alive --------------------------------
+
+import os as _os
+import subprocess as _subprocess
+import time as _time
+
+import pytest as _pytest
+
+_POSIX_PROC = sys.platform != "win32" and _os.path.isdir("/proc")
+
+
+@_pytest.mark.skipif(not _POSIX_PROC, reason="needs POSIX /proc")
+def test_pid_alive_true_for_running_process():
+    assert platform_compat.pid_alive(_os.getpid())
+
+
+@_pytest.mark.skipif(not _POSIX_PROC, reason="needs POSIX /proc")
+def test_pid_alive_treats_zombie_child_as_dead():
+    """Training jobs are Popen children that nobody wait()s on, so a crashed
+    job lingers as a zombie. kill(pid, 0) still succeeds for zombies, which
+    made pid_alive report the job as running and wedged the per-GPU lock with
+    a phantom 409 — a zombie must read as dead."""
+    proc = _subprocess.Popen([sys.executable, "-c", ""])
+    try:
+        deadline = _time.time() + 10
+        while _time.time() < deadline:
+            with open(f"/proc/{proc.pid}/stat", encoding="ascii", errors="replace") as f:
+                if f.read().rpartition(")")[2].split()[0] == "Z":
+                    break
+            _time.sleep(0.05)
+        else:
+            _pytest.fail("child never became a zombie")
+        assert not platform_compat.pid_alive(proc.pid)
+    finally:
+        proc.wait()
+
+
+@_pytest.mark.skipif(not _POSIX_PROC, reason="needs POSIX /proc")
+def test_pid_alive_false_for_reaped_process():
+    proc = _subprocess.Popen([sys.executable, "-c", ""])
+    proc.wait()
+    assert not platform_compat.pid_alive(proc.pid)
