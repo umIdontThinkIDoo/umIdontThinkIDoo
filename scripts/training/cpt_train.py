@@ -102,6 +102,11 @@ def main():
         quantization_config=quantization_config,
         device_map="auto" if torch.cuda.is_available() else None,
         trust_remote_code=True,
+        # Force fp16: with dtype unset, non-quantized modules and LoRA adapters
+        # take the checkpoint's native dtype (often bf16), and the fp16
+        # GradScaler crashes in unscale_. fp16 is also the only safe choice on
+        # Pascal (cc 6.0 has no bf16).
+        dtype=torch.float16 if torch.cuda.is_available() else None,
     )
 
     lora_config = LoraConfig(
@@ -134,6 +139,14 @@ def main():
         processing_class=tokenizer,
         peft_config=lora_config,
     )
+
+    # TRL force-casts QLoRA adapter weights to bf16 on 4-bit models regardless
+    # of fp16/bf16 args; bf16 grads crash the fp16 GradScaler and Pascal
+    # (cc 6.0) has no bf16 at all. Cast trainables back to fp32 (peft's own
+    # QLoRA layout) so the scaler sees supported dtypes.
+    for param in trainer.model.parameters():
+        if param.requires_grad and param.dtype == torch.bfloat16:
+            param.data = param.data.to(torch.float32)
 
     log("[CPT] Starting training...")
     trainer.train()

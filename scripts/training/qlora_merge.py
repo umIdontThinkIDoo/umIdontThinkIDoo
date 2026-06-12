@@ -70,7 +70,7 @@ def main():
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model_id,
-        torch_dtype=torch.float16,
+        dtype=torch.float16,  # transformers 5 renamed torch_dtype → dtype
         device_map="auto" if torch.cuda.is_available() else "cpu",
         trust_remote_code=True,
     )
