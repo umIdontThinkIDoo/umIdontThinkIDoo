@@ -33,6 +33,55 @@ from src.upload_limits import read_upload_limited, MEMORY_IMPORT_MAX_BYTES
 
 logger = logging.getLogger(__name__)
 
+# Matches a fenced code block (```json ... ``` or bare ```), capturing the body.
+_CODE_FENCE_RE = re.compile(r"^\s*```[a-zA-Z0-9_-]*\s*\n(.*?)\n?\s*```\s*$", re.DOTALL)
+
+
+def _parse_suggestion_text(suggestion_text: str) -> List[str]:
+    """Parse LLM memory-suggestion output into a list of strings.
+
+    Local models rarely return the bare JSON array we ask for: gemma/qwen wrap
+    it in a markdown code fence, sometimes with prose around it. Try, in order:
+    the whole text as JSON, the fenced block as JSON, the first [...] span as
+    JSON, then a line-split fallback that filters out fence/bracket noise.
+    """
+    text = (suggestion_text or "").strip()
+    if not text:
+        return []
+
+    def _from_json(blob: str) -> Optional[List[str]]:
+        try:
+            parsed = json.loads(blob)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, list):
+            return None
+        out = []
+        for s in parsed:
+            val = s if isinstance(s, str) else (s.get("text", "") if isinstance(s, dict) else "")
+            if val:
+                out.append(val)
+        return out
+
+    candidates = [text]
+    fence = _CODE_FENCE_RE.match(text)
+    if fence:
+        candidates.append(fence.group(1).strip())
+    start, end = text.find("["), text.rfind("]")
+    if start != -1 and end > start:
+        candidates.append(text[start:end + 1])
+    for blob in candidates:
+        result = _from_json(blob)
+        if result is not None:
+            return result
+
+    noise = {"```", "```json", "[", "]", "{", "}"}
+    return [
+        _strip_list_prefix(line.strip())
+        for line in text.splitlines()
+        if line.strip() and line.strip() not in noise
+    ]
+
 
 def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionManager, memory_vector=None):
     """Set up memory-related routes."""
@@ -225,22 +274,18 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         messages = [system_msg] + sess.get_context_messages()
 
         try:
+            # 500 tokens is not enough for thinking models (qwen3/gemma4): the
+            # whole budget can go to reasoning, leaving empty content and
+            # therefore zero suggestions. Give room for thinking + the answer.
             suggestion_text = await llm_call_async(
                 sess.endpoint_url,
                 sess.model,
                 messages,
                 temperature=0.2,
-                max_tokens=500,
+                max_tokens=3000,
                 headers=sess.headers,
             )
-            try:
-                suggestions = json.loads(suggestion_text)
-                if isinstance(suggestions, list):
-                    suggestions = [s if isinstance(s, str) else s.get("text", "") for s in suggestions]
-                else:
-                    suggestions = []
-            except json.JSONDecodeError:
-                suggestions = [line.strip() for line in suggestion_text.splitlines() if line.strip()]
+            suggestions = _parse_suggestion_text(suggestion_text)
 
             return {"suggestions": [s for s in suggestions if s]}
         except Exception as e:
