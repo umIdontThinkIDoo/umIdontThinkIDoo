@@ -32,9 +32,14 @@ class RAGManager:
         logger.info("RAGManager initialized as wrapper for VectorRAG")
     
     # Delegate all methods to VectorRAG
-    def search(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
-        """Search for documents - delegates to VectorRAG."""
-        return self.vector_rag.search(query, k)
+    def search(self, query: str, k: int = 5, owner: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Search for documents - delegates to VectorRAG.
+
+        `owner` must be forwarded: chat retrieval calls search(..., owner=owner)
+        to scope results to the asking user. Dropping it here raised a TypeError
+        that the chat path swallowed, silently returning no documents.
+        """
+        return self.vector_rag.search(query, k, owner=owner)
     
     def index_personal_documents(
         self,
@@ -49,9 +54,9 @@ class RAGManager:
             owner=owner,
         )
     
-    def retrieve(self, query: str, k: int = 5) -> List[str]:
+    def retrieve(self, query: str, k: int = 5, owner: Optional[str] = None) -> List[str]:
         """Retrieve relevant chunks - delegates to VectorRAG."""
-        return self.vector_rag.retrieve(query, k)
+        return [r["document"] for r in self.vector_rag.search(query, k, owner=owner)]
     
     def rebuild_index(self) -> bool:
         """Rebuild index - delegates to VectorRAG."""

@@ -439,6 +439,12 @@ function _updateIngestUI(body, s) {
   const fileList  = body.querySelector('#fg-ingest-file-list');
 
   if (!overallEl) return;
+  // Show the Stop button only while a job is actively running.
+  const stopBtn = body.querySelector('#fg-ingest-stop-btn');
+  if (stopBtn) {
+    stopBtn.style.display = s.running ? '' : 'none';
+    if (s.running) { stopBtn.disabled = false; stopBtn.textContent = 'Stop'; }
+  }
   if (!s.running && !(s.files || []).length) { overallEl.style.display = 'none'; return; }
   overallEl.style.display = '';
 
@@ -514,6 +520,7 @@ function _buildIngest(body) {
   html += '<div class="ingest-actions">';
   html += '<button class="cookbook-btn" id="fg-ingest-pick-files" style="flex:1"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:4px"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>Pick Files</button>';
   html += '<button class="cookbook-btn" id="fg-ingest-pick-folder" style="flex:1"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:4px"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Pick Folder</button>';
+  html += '<button class="cookbook-btn" id="fg-ingest-stop-btn" style="display:none" title="Finish the current file, then stop and defer the rest">Stop</button>';
   html += '<button class="cookbook-btn" id="fg-ingest-clear-btn" style="opacity:0.6" title="Clear results">Clear</button>';
   html += '</div>';
   html += '<input type="file" id="fg-ingest-file-input" multiple accept=".pdf,.epub,.txt,.md,.docx,.rst,.csv" style="display:none">';
@@ -533,6 +540,19 @@ function _buildIngest(body) {
   const pickFiles  = body.querySelector('#fg-ingest-pick-files');
   const pickFolder = body.querySelector('#fg-ingest-pick-folder');
   const clearBtn   = body.querySelector('#fg-ingest-clear-btn');
+  const stopBtn    = body.querySelector('#fg-ingest-stop-btn');
+
+  stopBtn.addEventListener('click', async () => {
+    stopBtn.disabled = true;
+    stopBtn.textContent = 'Stopping…';
+    try {
+      const r = await fetch(`${API}/api/ingest/stop`, { method: 'POST', credentials: 'same-origin' });
+      const d = await r.json().catch(() => ({}));
+      if (d.deferred_count) {
+        alert(`Stopping after the current file. ${d.deferred_count} file(s) deferred — re-select the same folder later to resume (already-ingested books are skipped).`);
+      }
+    } catch (_) {}
+  });
 
   pickFiles.addEventListener('click', () => fileInput.click());
   pickFolder.addEventListener('click', () => folderInput.click());

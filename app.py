@@ -669,7 +669,7 @@ app.include_router(setup_cookbook_routes())
 from routes.training_routes import setup_training_routes
 app.include_router(setup_training_routes())
 from routes.ingest_routes import setup_ingest_routes
-app.include_router(setup_ingest_routes(rag_manager, rag_available))
+app.include_router(setup_ingest_routes(rag_manager, rag_available, upload_handler=upload_handler))
 
 # Hardware model fitting (cookbook "What Fits?" tab)
 from routes.hwfit_routes import setup_hwfit_routes
@@ -913,6 +913,17 @@ async def _startup_event():
         _startup_tasks.append(start_bg_monitor())
     except Exception as _e:
         logger.warning("Failed to start background-job monitor: %s", _e)
+    # Guarantee the Library's PDF viewer/ingest dependency (PyMuPDF) is present
+    # on every launch — self-heals with a one-time pip install if missing. Run
+    # off the event loop so a slow install never blocks the UI coming up.
+    async def _ensure_pdf_runtime():
+        try:
+            from src.pdf_runtime import ensure_pymupdf
+            ok = await asyncio.to_thread(ensure_pymupdf)
+            logger.info("[startup] PDF viewer dependency (PyMuPDF) %s", "ready" if ok else "UNAVAILABLE")
+        except Exception as e:
+            logger.warning("PyMuPDF startup check failed (non-critical): %s", e)
+    _startup_tasks.append(asyncio.create_task(_ensure_pdf_runtime()))
     # MCP servers can be slow or blocked by local tooling. Connect them after
     # the web server is accepting traffic instead of delaying the whole UI.
     async def _startup_mcp_connections():

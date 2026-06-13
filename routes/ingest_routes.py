@@ -7,11 +7,14 @@ Routes (all under /api/ingest):
   POST   /upload        — multipart upload of one or more files
   GET    /progress      — current job state (polling)
   GET    /stats         — RAG collection stats
+  POST   /stop          — graceful stop at the next book boundary
   POST   /clear-state   — reset progress state (not data)
   DELETE /document      — remove a previously ingested source
 """
 
 import asyncio
+import io
+import logging
 import os
 import re
 import threading
@@ -26,6 +29,8 @@ from fastapi.responses import JSONResponse
 
 from src.auth_helpers import require_user
 
+logger = logging.getLogger(__name__)
+
 
 # ── Module-level state ────────────────────────────────────────────────────────
 
@@ -36,6 +41,10 @@ _state: Dict[str, Any] = {
     "done_files": 0,
     "total_chunks": 0,
     "running": False,
+    # Set by POST /stop. _run_ingest_job checks it between files and halts at the
+    # next book boundary, leaving in-flight work intact and marking the rest
+    # "deferred" so the UI can show what's left to re-ingest.
+    "stop_requested": False,
 }
 _state_lock = threading.Lock()
 _executor = ThreadPoolExecutor(max_workers=2)
@@ -142,9 +151,73 @@ def _chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[s
     return [c for c in chunks if len(c.strip()) > 30]
 
 
+# ── Library mirroring ─────────────────────────────────────────────────────────
+
+def _add_pdf_to_library(name: str, file_bytes: bytes, owner: str, upload_handler) -> Optional[str]:
+    """Persist an ingested PDF into the Library so it's viewable/readable and
+    confirms what was chunked. Reuses the exact same path as
+    /api/documents/import-pdf: save the bytes via upload_handler, then create a
+    plain `pdf_source`-marked Document the PDF viewer can render.
+
+    Idempotent on re-ingest: upload_handler.save_upload dedups identical bytes by
+    hash (returns the existing upload id), and we skip creating a second Document
+    when one already points at that upload. Best-effort — a failure here is
+    logged and never fails the ingest (the chunks are what matter).
+    """
+    try:
+        from starlette.datastructures import Headers, UploadFile as StarletteUploadFile
+        from src.pdf_form_doc import create_plain_pdf_document
+        from core.database import SessionLocal, Document
+    except Exception as exc:
+        logger.warning("Library mirror unavailable (import failed): %s", exc)
+        return None
+
+    try:
+        upload = StarletteUploadFile(
+            file=io.BytesIO(file_bytes),
+            filename=name,
+            headers=Headers({"content-type": "application/pdf"}),
+        )
+        # client_ip="ingest" is a synthetic source label for rate-limit bookkeeping.
+        meta = upload_handler.save_upload(upload, "ingest", owner=owner)
+        upload_id = meta["id"]
+
+        # Dedup: a Document already pointing at this upload means we (or a prior
+        # import) already mirrored it — don't create a duplicate library entry.
+        db = SessionLocal()
+        try:
+            existing = db.query(Document).filter(
+                Document.current_content.like(f'%upload_id="{upload_id}"%')
+            ).first()
+            if existing:
+                return existing.id
+        finally:
+            db.close()
+
+        title = os.path.splitext(name)[0]
+        doc_id = create_plain_pdf_document(
+            session_id=None, upload_id=upload_id, title=title, body_text=None
+        )
+        # A session-less import leaves owner NULL, which the Library's owner
+        # filter then hides — stamp the ingesting user so the doc shows up.
+        if doc_id and owner:
+            db = SessionLocal()
+            try:
+                doc = db.query(Document).filter(Document.id == doc_id).first()
+                if doc and not doc.owner:
+                    doc.owner = owner
+                    db.commit()
+            finally:
+                db.close()
+        return doc_id
+    except Exception as exc:
+        logger.warning("Library mirror failed for %s: %s", name, exc)
+        return None
+
+
 # ── Background processing ─────────────────────────────────────────────────────
 
-def _process_file(file_entry: Dict, file_bytes: bytes, rag_manager, owner: str):
+def _process_file(file_entry: Dict, file_bytes: bytes, rag_manager, owner: str, upload_handler=None):
     name = file_entry["name"]
     try:
         import tempfile
@@ -198,6 +271,15 @@ def _process_file(file_entry: Dict, file_bytes: bytes, rag_manager, owner: str):
                 with _state_lock:
                     file_entry["progress"] = pct
 
+        # Mirror PDFs into the Library so the user can confirm what was chunked
+        # and actually read them. Only for PDFs (the viewer renders PDF pages),
+        # only when chunks were produced, and best-effort (never blocks "done").
+        if upload_handler and name.lower().endswith(".pdf") and chunks:
+            with _state_lock:
+                file_entry["status"] = "library"
+                file_entry["progress"] = 99
+            _add_pdf_to_library(name, file_bytes, owner, upload_handler)
+
         with _state_lock:
             file_entry["status"] = "done"
             file_entry["progress"] = 100
@@ -216,13 +298,26 @@ def _process_file(file_entry: Dict, file_bytes: bytes, rag_manager, owner: str):
             _state["running"] = False
 
 
-def _run_ingest_job(files_data: List[tuple], rag_manager, owner: str):
+def _run_ingest_job(files_data: List[tuple], rag_manager, owner: str, upload_handler=None):
     """files_data: list of (file_entry_dict, bytes)"""
     with _state_lock:
         _state["running"] = True
 
     for file_entry, file_bytes in files_data:
-        _process_file(file_entry, file_bytes, rag_manager, owner)
+        # Graceful stop: honour a stop request at the book boundary — finish the
+        # files already done, never abandon one mid-embed. Whatever hasn't
+        # started is marked "deferred" so the UI lists what to re-ingest later
+        # (re-selecting the folder is idempotent: done books are skipped).
+        with _state_lock:
+            if _state["stop_requested"]:
+                for entry, _ in files_data:
+                    if entry.get("status") == "queued":
+                        entry["status"] = "deferred"
+                        _state["done_files"] += 1
+                _state["running"] = False
+                _state["stop_requested"] = False
+                return
+        _process_file(file_entry, file_bytes, rag_manager, owner, upload_handler)
 
 
 # ── Route factory ─────────────────────────────────────────────────────────────
@@ -236,7 +331,7 @@ def _get_rag():
         return None
 
 
-def setup_ingest_routes(rag_manager=None, rag_available: bool = False):
+def setup_ingest_routes(rag_manager=None, rag_available: bool = False, upload_handler=None):
     router = APIRouter(prefix="/api/ingest", tags=["ingest"])
 
     ALLOWED = {".pdf", ".epub", ".txt", ".md", ".docx", ".rst", ".csv"}
@@ -307,9 +402,10 @@ def setup_ingest_routes(rag_manager=None, rag_available: bool = False):
             _state["done_files"] = 0
             _state["total_chunks"] = 0
             _state["running"] = bool(files_data)
+            _state["stop_requested"] = False
 
         if files_data:
-            _executor.submit(_run_ingest_job, files_data, rm, owner)
+            _executor.submit(_run_ingest_job, files_data, rm, owner, upload_handler)
 
         return {"job_id": _state["job_id"], "queued": len(files_data), "skipped": len(entries) - len(files_data)}
 
@@ -329,13 +425,27 @@ def setup_ingest_routes(rag_manager=None, rag_available: bool = False):
         except Exception as e:
             return {"available": False, "error": str(e)}
 
+    @router.post("/stop")
+    async def ingest_stop(owner: str = Depends(require_user)):
+        """Request a graceful stop. The worker finishes the file it's on, then
+        halts at the next book boundary and marks the rest 'deferred'. Returns
+        the names of files that will be deferred so the UI can show what's left
+        (re-selecting the same folder later is idempotent and resumes them)."""
+        with _state_lock:
+            if not _state["running"]:
+                return {"ok": True, "running": False, "deferred": []}
+            _state["stop_requested"] = True
+            deferred = [f["name"] for f in _state["files"] if f.get("status") == "queued"]
+        return {"ok": True, "stopping": True, "deferred": deferred, "deferred_count": len(deferred)}
+
     @router.post("/clear-state")
     async def ingest_clear_state():
         if _state["running"]:
             raise HTTPException(409, "Job still running")
         with _state_lock:
             _state.update({"job_id": None, "files": [], "total_files": 0,
-                           "done_files": 0, "total_chunks": 0, "running": False})
+                           "done_files": 0, "total_chunks": 0, "running": False,
+                           "stop_requested": False})
         return {"ok": True}
 
     return router

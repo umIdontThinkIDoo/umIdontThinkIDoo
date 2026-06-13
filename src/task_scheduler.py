@@ -256,6 +256,34 @@ class TaskScheduler:
         self._run_semaphore = asyncio.Semaphore(1)
         self._concurrency_cap = 1
         self._task_handles = {}
+        # The loop the lock/semaphore are currently bound to. asyncio.Lock and
+        # Semaphore are single-loop primitives (they bind to the running loop on
+        # first acquire). This scheduler is created at import and shared with the
+        # event bus, so the primitives can get first-bound to a transient loop
+        # and then crash with "bound to a different event loop" once _loop runs
+        # on the serving loop. _sync_to_loop() rebinds them to the live loop.
+        self._lock_loop = None
+
+    def _sync_to_loop(self):
+        """Ensure _executing_lock/_run_semaphore are bound to the running loop.
+
+        Rebinds (replaces) them if the loop changed since they were created.
+        Safe because a loop change means nothing is legitimately held on the new
+        loop. Call from inside the running loop before acquiring either.
+        """
+        loop = asyncio.get_running_loop()
+        if self._lock_loop is not loop:
+            self._executing_lock = asyncio.Lock()
+            self._run_semaphore = asyncio.Semaphore(self._concurrency_cap)
+            self._lock_loop = loop
+
+    def _exec_lock(self):
+        self._sync_to_loop()
+        return self._executing_lock
+
+    def _sem(self):
+        self._sync_to_loop()
+        return self._run_semaphore
 
     def _set_run_progress(self, run_id: str, message: str):
         """Persist short live progress text for Activity while a run is active."""
@@ -597,7 +625,7 @@ class TaskScheduler:
         db = SessionLocal()
         try:
             now = _utcnow()
-            async with self._executing_lock:
+            async with self._exec_lock():
                 # Snapshot under the lock so we don't race with mid-iteration adds.
                 executing_snapshot = set(self._executing)
                 # Scheduled tasks and deferred event tasks both use next_run.
@@ -648,7 +676,7 @@ class TaskScheduler:
                 await self._execute_task_locked(task_id, run_id, release_executing=release_executing)
                 return
 
-            async with self._run_semaphore:
+            async with self._sem():
                 await self._execute_task_locked(task_id, run_id, release_executing=release_executing)
         except asyncio.CancelledError:
             # If cancellation happens while queued behind the semaphore,
@@ -660,7 +688,7 @@ class TaskScheduler:
             if handle is current:
                 self._task_handles.pop(task_id, None)
             if release_executing:
-                async with self._executing_lock:
+                async with self._exec_lock():
                     self._executing.discard(task_id)
 
     async def _execute_task_locked(self, task_id: str, run_id: str, *, release_executing: bool = True):
@@ -940,7 +968,7 @@ class TaskScheduler:
             if handle is asyncio.current_task():
                 self._task_handles.pop(task_id, None)
             if release_executing:
-                async with self._executing_lock:
+                async with self._exec_lock():
                     self._executing.discard(task_id)
 
 
@@ -1827,7 +1855,7 @@ class TaskScheduler:
         """Run a chained task. Acquires _executing membership the same way
         run_task_now does so an overlapping scheduler tick can't double-dispatch
         the same task while the chain run is in flight."""
-        async with self._executing_lock:
+        async with self._exec_lock():
             if task_id in self._executing:
                 return  # already in flight (manual trigger, scheduler tick, or another chain)
             self._executing.add(task_id)
@@ -1943,7 +1971,7 @@ class TaskScheduler:
         if force:
             asyncio.create_task(self._execute_task(task_id, bypass_model_slot=True, release_executing=False))
             return True
-        async with self._executing_lock:
+        async with self._exec_lock():
             if task_id in self._executing:
                 return False
             self._executing.add(task_id)
@@ -1957,7 +1985,7 @@ class TaskScheduler:
         if handle and not handle.done():
             handle.cancel()
             stopped = True
-        async with self._executing_lock:
+        async with self._exec_lock():
             if task_id in self._executing:
                 self._executing.discard(task_id)
                 stopped = True
