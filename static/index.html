@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Odysseus Chat</title>
+  <title>Odysseus: Forge Of Blacksmiths</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 4L16 22L6 22Z' fill='%23e06c75'/%3E%3Cpath d='M16 8L16 22L24 22Z' fill='%23e06c75' opacity='0.6'/%3E%3Cpath d='M4 24Q10 20 16 24Q22 28 28 24' stroke='%23e06c75' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
   <link rel="manifest" href="/static/manifest.json">
   <meta name="theme-color" content="#282c34">
@@ -2467,5 +2467,56 @@
 <script type="module" src="/static/js/init.js"></script>
 <script type="module" src="/static/js/a11y.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>
+<!-- One-click PWA install. The browser fires `beforeinstallprompt` only when
+     the app is installable (served over a secure context, has a manifest +
+     service worker) and not already installed; we stash the event and surface
+     a themed button so the user can install in a single click. -->
+<script nonce="{{CSP_NONCE}}">
+(function(){
+  var deferred = null;
+  // Already running as an installed app — nothing to offer.
+  if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) return;
+  if (navigator.standalone) return;
+
+  function makeBtn(){
+    var b = document.getElementById('odys-install-btn');
+    if (b) return b;
+    b = document.createElement('button');
+    b.id = 'odys-install-btn';
+    b.type = 'button';
+    b.textContent = '⚒  Install Forge';
+    b.title = 'Install Odysseus: Forge Of Blacksmiths as an app';
+    b.style.cssText = [
+      'position:fixed','right:18px','bottom:18px','z-index:99999',
+      'padding:10px 16px','border-radius:10px','cursor:pointer',
+      'font:600 13px/1 var(--font-family, system-ui, sans-serif)',
+      'color:#fff','background:var(--brand-color, var(--red, #e06c75))',
+      'border:1px solid rgba(255,255,255,.18)',
+      'box-shadow:0 4px 14px rgba(0,0,0,.35)'
+    ].join(';');
+    b.addEventListener('click', async function(){
+      if (!deferred) return;
+      b.disabled = true;
+      deferred.prompt();
+      try { await deferred.userChoice; } catch(_) {}
+      deferred = null;
+      b.remove();
+    });
+    document.body.appendChild(b);
+    return b;
+  }
+
+  window.addEventListener('beforeinstallprompt', function(e){
+    e.preventDefault();      // suppress the mini-infobar so we control the UX
+    deferred = e;
+    makeBtn();
+  });
+  window.addEventListener('appinstalled', function(){
+    deferred = null;
+    var b = document.getElementById('odys-install-btn');
+    if (b) b.remove();
+  });
+})();
+</script>
 </body>
 </html>
