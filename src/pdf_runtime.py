@@ -53,8 +53,13 @@ def ensure_pymupdf() -> bool:
         return False
     try:
         import importlib
-        import fitz  # noqa: F401
+        # invalidate_caches() MUST run before the import: pip just wrote fitz
+        # into an already-scanned site-packages dir, and the import system's
+        # finder caches won't see the new files until they're invalidated.
+        # Importing first (the old order) raised ImportError every time, so the
+        # in-process self-heal never actually recovered.
         importlib.invalidate_caches()
+        import fitz  # noqa: F401
         logger.info("PyMuPDF installed and ready (%s)", getattr(fitz, "__doc__", "ok").splitlines()[0] if getattr(fitz, "__doc__", None) else "ok")
         return True
     except ImportError as exc:
