@@ -2489,11 +2489,113 @@ function initDangerZone() {
 }
 
 /* ═══════════════════════════════════════════
+   LOCAL OLLAMA SERVER CONTROL (loopback only)
+   ═══════════════════════════════════════════ */
+function _ollamaMsg(text, cls) {
+  const m = el('ollama-control-msg');
+  if (!m) return;
+  m.textContent = text || '';
+  m.className = cls || '';
+}
+
+function _renderOllamaStatus(st) {
+  const dot = el('ollama-status-dot');
+  const txt = el('ollama-status-text');
+  const startBtn = el('ollama-start-btn');
+  const stopBtn = el('ollama-stop-btn');
+  if (!dot || !txt) return;
+  const running = !!(st && st.running);
+  const installed = !st || st.installed !== false;
+  let color = '#888', label = 'Stopped';
+  if (!installed) {
+    color = '#c0392b';
+    label = 'Not installed';
+  } else if (running) {
+    color = '#2ecc71';
+    label = st.version ? `Running · v${st.version}` : 'Running';
+    if (st.managed) label += ' (started here)';
+    else label += ' (external)';
+  }
+  dot.style.background = color;
+  txt.textContent = label;
+  if (startBtn) startBtn.disabled = running || !installed;
+  // Only offer Stop for a server we started — never kill an external/systemd one.
+  if (stopBtn) stopBtn.disabled = !(running && st && st.managed);
+}
+
+async function refreshOllamaStatus() {
+  if (!el('ollama-status-dot')) return;
+  try {
+    const res = await fetch('/api/ollama/status', { credentials: 'same-origin' });
+    if (!res.ok) return;
+    _renderOllamaStatus(await res.json());
+  } catch (_) { /* leave last-known status */ }
+}
+
+function initOllamaControl() {
+  if (!el('ollama-control-card')) return;
+  // Brand the card heading with the same Ollama logo the picker uses.
+  try {
+    const slot = document.querySelector('#ollama-control-card .adm-ollama-logo');
+    if (slot && !slot.innerHTML) {
+      const svg = providerLogo('ollama') || '';
+      if (svg) slot.innerHTML = svg;
+    }
+  } catch (_) {}
+
+  const startBtn = el('ollama-start-btn');
+  const stopBtn = el('ollama-stop-btn');
+  if (startBtn) {
+    startBtn.addEventListener('click', async () => {
+      startBtn.disabled = true;
+      const prev = startBtn.textContent;
+      startBtn.textContent = 'Starting…';
+      _ollamaMsg('Starting Ollama…', '');
+      try {
+        const res = await fetch('/api/ollama/start', { method: 'POST', credentials: 'same-origin' });
+        const d = await res.json().catch(() => ({}));
+        if (res.ok) {
+          _ollamaMsg(d.message || 'Ollama started.', 'admin-success');
+          _renderOllamaStatus(d);
+        } else {
+          _ollamaMsg(d.detail || 'Failed to start Ollama.', 'admin-error');
+        }
+      } catch (e) {
+        _ollamaMsg('Request failed: ' + (e && e.message ? e.message : 'error'), 'admin-error');
+      }
+      startBtn.textContent = prev;
+      refreshOllamaStatus();
+    });
+  }
+  if (stopBtn) {
+    stopBtn.addEventListener('click', async () => {
+      stopBtn.disabled = true;
+      const prev = stopBtn.textContent;
+      stopBtn.textContent = 'Stopping…';
+      _ollamaMsg('Stopping Ollama…', '');
+      try {
+        const res = await fetch('/api/ollama/stop', { method: 'POST', credentials: 'same-origin' });
+        const d = await res.json().catch(() => ({}));
+        if (res.ok) {
+          _ollamaMsg(d.message || 'Ollama stopped.', 'admin-success');
+        } else {
+          _ollamaMsg(d.detail || 'Could not stop Ollama.', 'admin-error');
+        }
+      } catch (e) {
+        _ollamaMsg('Request failed: ' + (e && e.message ? e.message : 'error'), 'admin-error');
+      }
+      stopBtn.textContent = prev;
+      refreshOllamaStatus();
+    });
+  }
+}
+
+/* ═══════════════════════════════════════════
    INIT & REFRESH
    ═══════════════════════════════════════════ */
 function initAll() {
   modalEl = el('settings-modal');
-  const inits = [initSignupToggle, initAddUser, initEndpointForm, initMcpForm, initCalDAV, initBackup, initDangerZone, initTokenForm, () => settingsModule.initIntegrations()];
+  const inits = [initSignupToggle, initAddUser, initEndpointForm, initMcpForm, initCalDAV, initBackup, initDangerZone, initTokenForm, initOllamaControl, () => settingsModule.initIntegrations()];
   for (const fn of inits) {
     try { fn(); } catch (e) { console.error('Admin init error in', fn.name || 'anonymous', e); }
   }
@@ -2507,6 +2609,7 @@ function refreshAll() {
   loadBuiltinTools();
   loadMcpServers();
   loadTokens();
+  refreshOllamaStatus();
 }
 
 /* ═══════════════════════════════════════════

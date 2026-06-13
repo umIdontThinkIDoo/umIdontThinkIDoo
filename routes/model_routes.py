@@ -2241,4 +2241,36 @@ def setup_model_routes(model_discovery):
         _save_settings(settings)
         return {"ok": True, "disabled": body.disabled}
 
+    # ---- Local Ollama server control (loopback only; see src/ollama_control) ----
+
+    @router.get("/ollama/status")
+    async def ollama_status(request: Request):
+        """Report whether a local Ollama server is reachable on 127.0.0.1:11434."""
+        require_admin(request)
+        import asyncio as _asyncio
+        from src import ollama_control
+        return await _asyncio.to_thread(ollama_control.status)
+
+    @router.post("/ollama/start")
+    async def ollama_start(request: Request):
+        """Start a loopback-only Ollama server and wait until it's ready."""
+        require_admin(request)
+        import asyncio as _asyncio
+        from src import ollama_control
+        result = await _asyncio.to_thread(ollama_control.start)
+        if not result.get("ok"):
+            raise HTTPException(503, result.get("error", "Failed to start Ollama."))
+        return result
+
+    @router.post("/ollama/stop")
+    async def ollama_stop(request: Request):
+        """Stop the Ollama server Odysseus started (refuses to kill external ones)."""
+        require_admin(request)
+        import asyncio as _asyncio
+        from src import ollama_control
+        result = await _asyncio.to_thread(ollama_control.stop)
+        if not result.get("ok"):
+            raise HTTPException(409, result.get("error", "Could not stop Ollama."))
+        return result
+
     return router
