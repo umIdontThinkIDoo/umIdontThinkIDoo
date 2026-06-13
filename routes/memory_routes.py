@@ -26,6 +26,7 @@ from core.session_manager import SessionManager
 from src.request_models import MemoryAddRequest
 from core.database import SessionLocal
 from src.llm_core import llm_call_async
+from src.text_helpers import strip_think
 from services.memory.memory_extractor import audit_memories
 from src.auth_helpers import get_current_user, require_user
 from src.endpoint_resolver import resolve_endpoint
@@ -292,6 +293,78 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             logger.error(f"LLM memory extraction failed (session {session}): {e}")
             fallback = memory_manager.extract_memory_from_chat(sess.history, session)
             return {"suggestions": [item["text"] for item in fallback]}
+
+    @router.post("/interview")
+    async def personalizer_interview(request: Request):
+        """Drive a model-led personalizer interview.
+
+        The frontend posts the transcript so far (``{"transcript": [{"role",
+        "content"}, ...]}``) and we return the model's NEXT question, adapted to
+        everything answered already, or ``{"done": true}`` once it judges it has
+        learned enough. Replaces the old fixed 10-question script — the model
+        decides what to ask next and when to stop.
+        """
+        require_user(request)
+        owner = _owner(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        raw_transcript = body.get("transcript") or []
+
+        endpoint_url, model, headers = resolve_endpoint("utility", owner=owner)
+        if not endpoint_url or not model:
+            raise HTTPException(400, "No LLM model configured. Set a default model in Settings.")
+
+        DONE_SENTINEL = "[INTERVIEW_COMPLETE]"
+        system_msg = {
+            "role": "system",
+            "content": (
+                "You are Odysseus' Personalizer — a warm, concise interviewer whose job is to learn "
+                "durable facts about the user so future conversations can be personalised. "
+                "Ask exactly ONE question per turn. Build on what they've already told you: ask natural "
+                "follow-ups, dig deeper on anything vague, and never repeat a question already answered. "
+                "Cover, over the course of the interview: who they are and what they do, the domains and "
+                "projects they care about, how they like information delivered, their goals, hard "
+                "preferences/things to avoid, time zone/working hours, and their tech stack if relevant. "
+                "Keep each question to one or two sentences, friendly and specific. Do NOT summarise their "
+                "answers back to them and do NOT preface with filler — just ask the next question. "
+                f"When you have gathered enough to personalise well (typically 7–10 exchanges), reply with "
+                f"exactly {DONE_SENTINEL} and nothing else."
+            ),
+        }
+
+        messages = [system_msg]
+        for turn in raw_transcript:
+            if not isinstance(turn, dict):
+                continue
+            role = "assistant" if turn.get("role") == "assistant" else "user"
+            content = str(turn.get("content") or "").strip()
+            if content:
+                messages.append({"role": role, "content": content})
+        if len(messages) == 1:
+            # Cold start: nudge the model to open the interview.
+            messages.append({"role": "user", "content": "Let's begin the interview. Ask me your first question."})
+
+        try:
+            # Generous budget: thinking models (qwen3/gemma) can spend the whole
+            # short budget on reasoning and return empty content otherwise.
+            reply = await llm_call_async(
+                endpoint_url, model, messages,
+                temperature=0.6, max_tokens=2000, headers=headers,
+            )
+        except Exception as e:
+            logger.error(f"Personalizer interview LLM call failed: {e}")
+            raise HTTPException(502, f"LLM call failed: {str(e)}")
+
+        reply = strip_think(reply or "").strip()
+        done = DONE_SENTINEL in reply
+        if done:
+            reply = reply.replace(DONE_SENTINEL, "").strip()
+        # If the model emitted only the sentinel (or nothing usable), it's done.
+        if not reply:
+            done = True
+        return {"question": reply, "done": done}
 
     @router.post("/audit")
     async def api_audit_memories(request: Request, session: str = Form(None)):

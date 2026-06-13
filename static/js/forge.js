@@ -634,25 +634,73 @@ function _buildPersonalizer(body) {
     } catch (_) {}
   }
 
+  function _finishInterview() {
+    _addMsg('assistant', "That's everything I need for now — I've saved it all to your memory. You can keep chatting normally; I'll remember all of this.");
+    if (inputRow) inputRow.style.display = 'none';
+    if (_personalizerState) _personalizerState.active = false;
+  }
+
+  // Show a transient "…" bubble while the model composes its next question.
+  function _showThinking() {
+    const div = document.createElement('div');
+    div.className = 'fg-pers-thinking';
+    div.style.cssText = 'max-width:85%;padding:10px 13px;border-radius:12px;font-size:13px;align-self:flex-start;opacity:0.6;background:color-mix(in srgb,var(--fg) 6%,transparent);';
+    div.textContent = '…';
+    chatEl.appendChild(div);
+    chatEl.scrollTop = chatEl.scrollHeight;
+    return div;
+  }
+
+  // Model-driven: send the transcript so far, get the next adaptive question.
+  // Falls back to the fixed question list if the endpoint is unavailable so the
+  // interview still works with no model configured.
   async function _askNext() {
     const state = _personalizerState;
-    if (!state || state.qIdx >= INTERVIEW_QUESTIONS.length) {
-      _addMsg('assistant', "That's all the questions! I've saved everything to your memory. You can continue chatting normally — I'll remember all of this.");
-      if (inputRow) inputRow.style.display = 'none';
-      state.active = false;
+    if (!state || !state.active) return;
+
+    if (state.useFallback) {
+      if (state.qIdx >= INTERVIEW_QUESTIONS.length) { _finishInterview(); return; }
+      const q = INTERVIEW_QUESTIONS[state.qIdx++];
+      state.lastQuestion = q;
+      _addMsg('assistant', q);
       return;
     }
-    _addMsg('assistant', INTERVIEW_QUESTIONS[state.qIdx]);
-    state.qIdx++;
+
+    const thinking = _showThinking();
+    let data = null;
+    try {
+      const res = await fetch(`${API}/api/memory/interview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ transcript: state.transcript }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      data = await res.json();
+    } catch (_) {
+      // First failure → fall back to the static script for the rest of the run.
+      thinking.remove();
+      state.useFallback = true;
+      return _askNext();
+    }
+    thinking.remove();
+
+    if (data?.done || !data?.question) { _finishInterview(); return; }
+    const q = data.question;
+    state.lastQuestion = q;
+    state.transcript.push({ role: 'assistant', content: q });
+    _addMsg('assistant', q);
   }
 
   async function _handleAnswer() {
     const answer = answerEl.value.trim();
     if (!answer || !_personalizerState?.active) return;
+    const state = _personalizerState;
     answerEl.value = '';
     _addMsg('user', answer);
-    const qText = INTERVIEW_QUESTIONS[_personalizerState.qIdx - 1] || '';
-    await _saveMemory(`${qText} — ${answer}`, 'identity');
+    state.transcript.push({ role: 'user', content: answer });
+    const qText = state.lastQuestion || '';
+    await _saveMemory(qText ? `${qText} — ${answer}` : answer, 'identity');
     await _askNext();
   }
 
@@ -661,10 +709,10 @@ function _buildPersonalizer(body) {
 
   startBtn.addEventListener('click', () => {
     chatEl.innerHTML = '';
-    _personalizerState = { qIdx: 0, active: true, memories: [] };
+    _personalizerState = { qIdx: 0, active: true, memories: [], transcript: [], lastQuestion: '', useFallback: false };
     inputRow.style.display = 'flex';
-    _addMsg('assistant', "Hi! I'm going to ask you a few questions to learn about you. Your answers are saved as memories so I can personalise every conversation.\n\nLet's start:");
-    setTimeout(() => _askNext(), 500);
+    _addMsg('assistant', "Hi! I'm going to ask you a few questions to learn about you. Each answer is saved as a memory so I can personalise every conversation.\n\nLet's start:");
+    setTimeout(() => _askNext(), 400);
   });
 
   mineBtn.addEventListener('click', async () => {
