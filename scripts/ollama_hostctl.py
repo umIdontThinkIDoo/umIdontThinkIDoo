@@ -339,6 +339,23 @@ def main() -> int:
         f"[ollama-hostctl] listening on http://{BIND_HOST}:{BIND_PORT} "
         f"(ollama -> {OLLAMA_BASE_URL})\n"
     )
+
+    # Optionally bring ollama up as soon as the helper starts, so a host reboot
+    # leaves the model server running without anyone clicking "Start". Done in a
+    # background thread so the control HTTP server is responsive immediately.
+    if os.environ.get("OLLAMA_HOSTCTL_AUTOSTART", "").strip().lower() in ("1", "true", "yes", "on"):
+        import threading
+
+        def _boot_ollama() -> None:
+            res = do_start()
+            sys.stderr.write(
+                "[ollama-hostctl] autostart: "
+                + str(res.get("message") or res.get("error") or res)
+                + "\n"
+            )
+
+        threading.Thread(target=_boot_ollama, name="autostart", daemon=True).start()
+
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

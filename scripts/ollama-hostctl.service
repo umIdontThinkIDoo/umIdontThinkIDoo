@@ -1,0 +1,34 @@
+# Reference systemd *user* unit for the Ollama host-control helper.
+#
+# Install (as the host user, NOT root):
+#   mkdir -p ~/.config/systemd/user
+#   cp scripts/ollama-hostctl.service ~/.config/systemd/user/
+#   # adjust ODYSSEUS_DATA_DIR / OLLAMA_MODELS below to your paths
+#   loginctl enable-linger "$USER"          # so it runs at boot without login
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now ollama-hostctl.service
+#
+# The helper binds the docker-gateway IP (host-internal, NOT the LAN) and, with
+# OLLAMA_HOSTCTL_AUTOSTART=1, launches `ollama serve` on the same gateway at
+# boot. The Dockerized Odysseus reaches both via host.docker.internal and
+# delegates its Start/Stop buttons to this helper. See scripts/ollama_hostctl.py.
+[Unit]
+Description=Odysseus Ollama host-control helper (start/stop bridge for the container)
+After=network.target
+
+[Service]
+Type=simple
+Environment=OLLAMA_HOSTCTL_BIND=172.17.0.1
+Environment=OLLAMA_HOSTCTL_PORT=11436
+Environment=OLLAMA_SERVE_HOST=172.17.0.1:11434
+Environment=ODYSSEUS_DATA_DIR=/home/dari/odysseus/data
+# Point ollama at your existing model store so already-pulled models are visible.
+Environment=OLLAMA_MODELS=/media/dari/Above-Average/ollama_models
+# Bring ollama up automatically when the helper starts (e.g. on boot).
+Environment=OLLAMA_HOSTCTL_AUTOSTART=1
+ExecStart=/usr/bin/python3 /home/dari/odysseus/scripts/ollama_hostctl.py
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
