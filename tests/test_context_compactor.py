@@ -20,6 +20,7 @@ for mod in [
 import src.context_compactor as cc
 from src.context_compactor import (
     COMPACT_THRESHOLD,
+    COMPACT_TOKEN_CAP,
     SELF_SUMMARY_SYSTEM_PROMPT,
     SUMMARY_MAX_TOKENS,
     _content_as_text,
@@ -34,6 +35,50 @@ class TestCompactThreshold:
 
     def test_summary_max_tokens(self):
         assert SUMMARY_MAX_TOKENS == 1024
+
+
+class TestTokenCapTrigger:
+    """The fixed ~20k token cap must fire compaction even when the model's
+    window is huge (128k default) and the percentage trigger is nowhere near."""
+
+    def test_cap_value(self):
+        assert COMPACT_TOKEN_CAP == 20000
+
+    def _run_over_cap(self, *, window):
+        orig = (cc.get_context_length, cc.llm_call_async,
+                cc.resolve_endpoint, cc._update_session_history)
+
+        async def _fake_summary(*a, **k):
+            return "summary"
+
+        cc.get_context_length = lambda url, model: window
+        cc.llm_call_async = _fake_summary
+        cc.resolve_endpoint = lambda which, owner=None: (None, None, None)
+        cc._update_session_history = lambda *a, **k: None
+
+        # Build a history above the 20k cap but well under 85% of a 128k window
+        # (so only the cap, not the percentage, can be what fires).
+        msgs = [{"role": "system", "content": "You are helpful."}]
+        for i in range(100):
+            msgs.append({"role": "user", "content": f"u{i} " + "x" * 500})
+            msgs.append({"role": "assistant", "content": f"a{i} " + "y" * 500})
+        try:
+            from src.model_context import estimate_tokens
+            used = estimate_tokens(msgs)
+            assert used >= COMPACT_TOKEN_CAP, f"fixture only {used} tokens"
+            assert used < window * COMPACT_THRESHOLD, "fixture would trip pct trigger too"
+            return asyncio.run(maybe_compact(
+                None, "http://local/v1/chat/completions", "m", msgs, {}))
+        finally:
+            (cc.get_context_length, cc.llm_call_async,
+             cc.resolve_endpoint, cc._update_session_history) = orig
+
+    def test_fires_on_cap_below_percentage(self):
+        out, ctx, was = self._run_over_cap(window=128000)
+        assert was is True
+        from src.model_context import estimate_tokens
+        assert estimate_tokens(out) < estimate_tokens(
+            [{"role": "system", "content": "x" * 80000}])  # shrank substantially
 
 
 class TestSelfSummaryPrompt:

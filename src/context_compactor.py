@@ -37,6 +37,13 @@ def _content_as_text(content: Any) -> str:
 
 
 COMPACT_THRESHOLD = 0.85  # Trigger compaction at 85% of context window
+# Fixed token cap: compact once history reaches ~20k tokens REGARDLESS of the
+# model's window. Without this, a model that reports (or defaults to) a 128k
+# window would not compact until ~108k tokens — far past the "refresh every
+# ~20k" cadence we want, which keeps a ~20k working set so a long session stays
+# snappy and within a budgeted prompt. Whichever trigger trips first wins, so
+# small-context models still compact at 85% before reaching the cap.
+COMPACT_TOKEN_CAP = 20000
 SUMMARY_MAX_TOKENS = 1024
 SMALL_CONTEXT_LIMIT = 8192  # Models with context <= this get aggressive trimming
 
@@ -317,11 +324,15 @@ async def maybe_compact(
     used = estimate_tokens(messages)
     pct = (used / context_length) * 100 if context_length else 0
 
-    if pct < COMPACT_THRESHOLD * 100:
+    over_pct = pct >= COMPACT_THRESHOLD * 100
+    over_cap = used >= COMPACT_TOKEN_CAP
+    if not (over_pct or over_cap):
         return messages, context_length, False
 
+    trigger = "token-cap" if over_cap and not over_pct else f"{pct:.1f}% of window"
     logger.info(
-        f"Context at {pct:.1f}% ({used}/{context_length} tokens) — compacting"
+        f"Context at {used}/{context_length} tokens ({pct:.1f}%) "
+        f"— compacting (trigger: {trigger}, cap={COMPACT_TOKEN_CAP})"
     )
 
     # Split into system preface and conversation
