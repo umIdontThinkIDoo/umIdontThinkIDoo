@@ -1,6 +1,12 @@
 services:
   odysseus:
-    build: .
+    build:
+      context: .
+      args:
+        # Bake PyMuPDF (AGPL) into the image so the Library PDF viewer and the
+        # ingest->Library mirror work on every startup without a runtime pip
+        # install. Opted in for this self-hosted deploy; see requirements-optional.txt.
+        INSTALL_OPTIONAL: "true"
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000"
     volumes:
