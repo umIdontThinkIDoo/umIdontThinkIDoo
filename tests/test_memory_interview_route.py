@@ -92,3 +92,20 @@ def test_llm_failure_502(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(interview(request=_req({"transcript": []})))
     assert exc.value.status_code == 502
+
+
+def test_empty_reply_is_502_not_silent_done(monkeypatch):
+    # A model that returns empty content (a hiccup) must NOT be treated as
+    # "interview complete" — it should 502 so the frontend falls back.
+    interview, _ = _router(monkeypatch, reply="")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(interview(request=_req({"transcript": [{"role": "user", "content": "hi"}]})))
+    assert exc.value.status_code == 502
+
+
+def test_reply_that_is_only_think_block_is_502(monkeypatch):
+    # If the whole reply was reasoning that strips to empty, that's also a hiccup.
+    interview, _ = _router(monkeypatch, reply="<think>still thinking…</think>")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(interview(request=_req({"transcript": [{"role": "user", "content": "hi"}]})))
+    assert exc.value.status_code == 502

@@ -346,25 +346,39 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             # Cold start: nudge the model to open the interview.
             messages.append({"role": "user", "content": "Let's begin the interview. Ask me your first question."})
 
-        try:
-            # Generous budget: thinking models (qwen3/gemma) can spend the whole
-            # short budget on reasoning and return empty content otherwise.
-            reply = await llm_call_async(
-                endpoint_url, model, messages,
-                temperature=0.6, max_tokens=2000, headers=headers,
-            )
-        except Exception as e:
-            logger.error(f"Personalizer interview LLM call failed: {e}")
-            raise HTTPException(502, f"LLM call failed: {str(e)}")
+        # Generous budget: thinking models (qwen3/gemma) can spend the whole
+        # short budget on reasoning and return empty content otherwise. Some
+        # models (e.g. abliterated gemma) also return an empty body sporadically
+        # on a cold load, so retry once before giving up.
+        reply = ""
+        last_err = None
+        for _attempt in range(2):
+            try:
+                raw = await llm_call_async(
+                    endpoint_url, model, messages,
+                    temperature=0.6, max_tokens=2000, headers=headers,
+                )
+            except Exception as e:
+                last_err = e
+                logger.warning(f"Personalizer interview LLM call attempt failed: {e}")
+                continue
+            reply = strip_think(raw or "").strip()
+            if reply:
+                break
 
-        reply = strip_think(reply or "").strip()
-        done = DONE_SENTINEL in reply
-        if done:
-            reply = reply.replace(DONE_SENTINEL, "").strip()
-        # If the model emitted only the sentinel (or nothing usable), it's done.
+        if DONE_SENTINEL in reply:
+            # Model decided it has learned enough.
+            return {"question": reply.replace(DONE_SENTINEL, "").strip(), "done": True}
+
         if not reply:
-            done = True
-        return {"question": reply, "done": done}
+            # Empty output is a model hiccup, NOT completion — surface it so the
+            # frontend can fall back to its scripted questions rather than
+            # silently ending the interview after one turn.
+            detail = f"LLM call failed: {last_err}" if last_err else "Model returned no question."
+            logger.error(f"Personalizer interview produced no question: {detail}")
+            raise HTTPException(502, detail)
+
+        return {"question": reply, "done": False}
 
     @router.post("/audit")
     async def api_audit_memories(request: Request, session: str = Form(None)):
