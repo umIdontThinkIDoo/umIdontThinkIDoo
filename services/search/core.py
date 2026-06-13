@@ -48,6 +48,101 @@ SEARCH_CONFIG: Dict[str, Any] = {
     "primary_provider": "searxng",
 }
 
+# Per-page character budget for the excerpt handed to the model. A scraped page
+# is often far longer than this; the question is *which* slice the model sees.
+CONTENT_EXCERPT_BUDGET = 3000
+
+
+def _chunk_text_for_ranking(text: str, chunk_size: int = 700, overlap: int = 100) -> List[str]:
+    """Split text into overlapping fixed-size windows for semantic ranking.
+
+    Kept deliberately simple (char windows, not sentence-aware) — this feeds a
+    relevance ranker, not a persisted index, so chunk boundaries only need to be
+    granular enough to separate on-topic from off-topic passages.
+    """
+    text = (text or "").strip()
+    if len(text) <= chunk_size:
+        return [text] if text else []
+    chunks: List[str] = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + chunk_size, n)
+        chunks.append(text[start:end])
+        if end >= n:
+            break
+        start = end - overlap
+    return chunks
+
+
+def _relevant_excerpt(query: str, text: str, budget: int = CONTENT_EXCERPT_BUDGET, embed_client="__unset__"):
+    """Return up to ``budget`` chars of ``text`` most relevant to ``query``.
+
+    This is the RAG layer over the scraper: rather than feeding the model the
+    *first* ``budget`` chars of a page (where the answer often isn't), chunk the
+    page, embed the chunks and the query, and keep the highest-similarity chunks
+    in document order. Falls back to leading truncation when the page is short,
+    has one chunk, or no embedding backend is available — so search never breaks
+    if embeddings are down.
+
+    Returns ``(excerpt, was_trimmed)``.
+    """
+    text = text or ""
+    if len(text) <= budget:
+        return text, False
+
+    chunks = _chunk_text_for_ranking(text)
+    if len(chunks) <= 1:
+        return text[:budget], True
+
+    if embed_client == "__unset__":
+        try:
+            from src.embeddings import get_embedding_client
+            embed_client = get_embedding_client()
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("embedding client unavailable for web-search ranking: %s", e)
+            embed_client = None
+    if embed_client is None:
+        return text[:budget], True
+
+    try:
+        import numpy as np
+        qv = embed_client.encode([query])
+        cv = embed_client.encode(chunks)
+        if getattr(qv, "size", 0) == 0 or getattr(cv, "size", 0) == 0:
+            return text[:budget], True
+        # Vectors are L2-normalized, so dot product == cosine similarity.
+        scores = cv @ qv[0]
+        ranked = sorted(range(len(chunks)), key=lambda i: -float(scores[i]))
+
+        picked: List[int] = []
+        total = 0
+        for i in ranked:
+            clen = len(chunks[i])
+            if total + clen > budget and picked:
+                break
+            picked.append(i)
+            total += clen
+
+        picked.sort()
+        # Re-stitch in document order; drop the overlap on contiguous chunks so
+        # adjacent windows don't duplicate text, and mark skipped gaps.
+        parts: List[str] = []
+        prev = None
+        for i in picked:
+            if prev is None:
+                parts.append(chunks[i])
+            elif i == prev + 1:
+                parts.append(chunks[i][100:])  # strip the 100-char overlap
+            else:
+                parts.append("\n[…]\n")
+                parts.append(chunks[i])
+            prev = i
+        return "".join(parts), True
+    except Exception as e:
+        logger.debug("semantic excerpt ranking failed (%s); using leading slice", e)
+        return text[:budget], True
+
 
 def _is_secret_key(name: str) -> bool:
     """True for config keys that hold a credential (e.g. ``brave_api_key``)."""
@@ -423,6 +518,19 @@ def comprehensive_web_search(
         # Before this, blocks were numbered 1..N in fetch COMPLETION order,
         # which matched neither the sources list nor each other run to run.
         fetched_content.sort(key=lambda c: c.get("source_index") or len(search_results) + 1)
+
+        # Build one embedding client for the whole batch (cheap to reuse, and
+        # get_embedding_client() latches a down endpoint). Only bother if some
+        # page actually exceeds the excerpt budget — short pages need no ranking.
+        _embed_client = None
+        if any(len(c.get("content", "")) > CONTENT_EXCERPT_BUDGET for c in fetched_content):
+            try:
+                from src.embeddings import get_embedding_client
+                _embed_client = get_embedding_client()
+            except Exception as e:  # pragma: no cover - defensive
+                logger.debug("embedding client unavailable for web-search ranking: %s", e)
+                _embed_client = None
+
         for content in fetched_content:
             _idx = content.get("source_index")
             _label = f"[CONTENT {_idx}]" if _idx else "[CONTENT]"
@@ -430,10 +538,13 @@ def comprehensive_web_search(
             output_parts.append(f"Title: {content['title']}")
             output_parts.append("-" * 30)
 
-            text = content["content"][:3000]
-            if len(content["content"]) > 3000:
-                text += "... [truncated]"
+            text, was_trimmed = _relevant_excerpt(
+                query, content["content"],
+                budget=CONTENT_EXCERPT_BUDGET, embed_client=_embed_client,
+            )
             output_parts.append(text)
+            if was_trimmed:
+                output_parts.append("... [excerpt — page trimmed to its most query-relevant sections]")
 
             key_points = extract_key_points(content["content"])
             if key_points:
