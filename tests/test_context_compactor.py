@@ -237,3 +237,76 @@ class TestMaybeCompactFourthMessage:
         ]}
         result = self._run(messages)
         assert len(result) == 3 and result[2] is True
+
+
+class TestCompactionSummaryPersisted:
+    """When compaction fires, the summary must be persisted as a searchable
+    memory via the native provider (writes JSON + embeds in the vector store),
+    so compacted-away context stays retrievable. The hook is best-effort: a
+    provider failure must never break the compaction."""
+
+    class _RecordingProvider:
+        def __init__(self, boom=False):
+            self.calls = []
+            self.boom = boom
+
+        async def remember(self, text, **kwargs):
+            self.calls.append((text, kwargs))
+            if self.boom:
+                raise RuntimeError("vector store down")
+            return None
+
+    class _Registry:
+        def __init__(self, provider):
+            self._p = provider
+
+        def get(self, provider_id):
+            assert provider_id == "native"
+            return self._p
+
+    def _run(self, provider, *, context_length=500):
+        import src.memory_provider as mp
+        orig = (cc.get_context_length, cc.llm_call_async,
+                cc.resolve_endpoint, cc._update_session_history,
+                mp.get_memory_provider_registry())
+
+        async def _fake_summary(*a, **k):
+            return "DENSE SUMMARY"
+
+        cc.get_context_length = lambda url, model: context_length
+        cc.llm_call_async = _fake_summary
+        cc.resolve_endpoint = lambda which, owner=None: (None, None, None)
+        cc._update_session_history = lambda *a, **k: None
+        mp.set_memory_provider_registry(self._Registry(provider) if provider else None)
+
+        msgs = [{"role": "system", "content": "You are a helpful agent. " * 200}]
+        for i in range(6):
+            msgs.append({"role": "user", "content": f"turn {i}"})
+            msgs.append({"role": "assistant", "content": f"reply {i}"})
+        try:
+            return asyncio.run(maybe_compact(
+                None, "http://local/v1/chat/completions", "m", msgs, {}, owner="dari"))
+        finally:
+            (cc.get_context_length, cc.llm_call_async,
+             cc.resolve_endpoint, cc._update_session_history, _saved) = (*orig,)
+            mp.set_memory_provider_registry(_saved)
+
+    def test_summary_persisted_as_conversation_summary_memory(self):
+        provider = self._RecordingProvider()
+        _, _, was = self._run(provider)
+        assert was is True
+        assert len(provider.calls) == 1
+        text, kwargs = provider.calls[0]
+        assert "DENSE SUMMARY" in text
+        assert kwargs["category"] == "conversation_summary"
+        assert kwargs["source"] == "compaction"
+        assert kwargs["owner"] == "dari"
+
+    def test_persist_failure_does_not_break_compaction(self):
+        provider = self._RecordingProvider(boom=True)
+        result = self._run(provider)
+        assert len(result) == 3 and result[2] is True  # compaction still succeeded
+
+    def test_no_registry_is_a_noop(self):
+        result = self._run(None)
+        assert len(result) == 3 and result[2] is True

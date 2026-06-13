@@ -308,6 +308,37 @@ def trim_for_context(messages: List[Dict], context_length: int, reserve_tokens: 
     return result
 
 
+async def _persist_compaction_memory(
+    summary: str, owner: Optional[str], model: str, summarized_count: int
+) -> None:
+    """Store a compaction summary as a searchable native memory.
+
+    Routes through NativeMemoryProvider.remember(), which writes the JSON
+    entry and embeds it into the vector store in one call, so compacted-away
+    context stays retrievable later (semantic recall + editable in the memory
+    UI). Best-effort: any failure is logged and swallowed — persisting a memory
+    must never break the live compaction it rides on.
+    """
+    text = (summary or "").strip()
+    if not text:
+        return
+    try:
+        from src.memory_provider import get_memory_provider_registry
+        registry = get_memory_provider_registry()
+        if not registry:
+            return
+        provider = registry.get("native")
+        await provider.remember(
+            text,
+            owner=owner,
+            category="conversation_summary",
+            source="compaction",
+            metadata={"model": model, "summarized_messages": summarized_count},
+        )
+    except Exception as e:
+        logger.debug("Compaction-summary memory persist skipped: %s", e)
+
+
 async def maybe_compact(
     session,
     endpoint_url: str,
@@ -401,6 +432,11 @@ async def maybe_compact(
         "role": "system",
         "content": f"[Conversation summary — earlier messages were compacted]\n{summary}",
     }
+
+    # Persist the summary as a searchable memory so compacted context isn't lost
+    # to recall. remember() writes the JSON entry AND embeds it in the vector
+    # store in one call; best-effort, must never break the compaction itself.
+    await _persist_compaction_memory(summary, owner, compact_model, len(older))
 
     compacted = system_msgs + [summary_msg] + recent
 

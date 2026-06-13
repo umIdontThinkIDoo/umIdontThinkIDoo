@@ -318,3 +318,20 @@ class MemoryProviderRegistry:
             if isinstance(function_name, str) and function_name:
                 return function_name
         raise ValueError("Memory provider tool schema is missing a tool name")
+
+
+# ── Process-wide registry singleton ───────────────────────────────────────────
+# app_initializer builds the registry via DI and registers it here so layers
+# without a DI handle (e.g. src.context_compactor, which persists each
+# compaction summary as a searchable memory) can reach the native provider.
+# Mirrors the set_/get_session_manager pattern in core.models.
+_registry_instance: Optional["MemoryProviderRegistry"] = None
+
+
+def set_memory_provider_registry(registry: "MemoryProviderRegistry") -> None:
+    global _registry_instance
+    _registry_instance = registry
+
+
+def get_memory_provider_registry() -> Optional["MemoryProviderRegistry"]:
+    return _registry_instance
