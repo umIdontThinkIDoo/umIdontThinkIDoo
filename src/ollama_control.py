@@ -1,10 +1,20 @@
 # src/ollama_control.py
 """Start/stop/status control for a LOCAL Ollama server.
 
-HARD SECURITY RULE: the managed server binds 127.0.0.1 only. ``OLLAMA_HOST`` is
+HARD SECURITY RULE: a server *we* launch binds loopback only. ``OLLAMA_HOST`` is
 forced to ``127.0.0.1:11434`` here and is never derived from user input, so the
 "Start Ollama" button can never expose the model server off-box (no 0.0.0.0,
 no tunnel).
+
+DOCKER DEPLOY: when Odysseus runs in a container it cannot fork or even see a
+process in the host's namespaces, so the local-launch path below is a no-op
+there (no ollama binary in the image; the host's loopback ollama is invisible).
+For that case a host-side helper (scripts/ollama_hostctl.py) owns the lifecycle
+and we *delegate* to it: set ``OLLAMA_HOSTCTL_URL`` (and the shared token file)
+and start/stop/status proxy to the helper over the docker bridge. The helper —
+and the ollama it manages — bind the docker-gateway IP (host-internal, NOT the
+LAN), the deliberate, user-approved exception to "loopback only." When
+``OLLAMA_HOSTCTL_URL`` is unset (bare-metal installs), behaviour is unchanged.
 
 Model-store gotcha (see HANDOFF): the systemd unit runs ``ollama`` as the
 ``ollama`` user with ``OLLAMA_MODELS`` on a removable drive that the service
@@ -30,9 +40,62 @@ from src.settings import get_setting
 
 logger = logging.getLogger(__name__)
 
-# Loopback only. Not configurable — this is the security guarantee.
+# Loopback only for a server we launch ourselves. Not user-configurable — this
+# is the security guarantee for the local-launch path.
 OLLAMA_HOST = "127.0.0.1:11434"
-OLLAMA_BASE_URL = f"http://{OLLAMA_HOST}"
+
+
+def _base_url() -> str:
+    """Base URL of the Ollama server to talk to.
+
+    Honors ``OLLAMA_BASE_URL`` (set in the Docker deploy to reach the host's
+    ollama via ``host.docker.internal``); falls back to local loopback for
+    bare-metal installs. This only affects which server we *probe* — a server we
+    *launch* is still forced onto loopback via ``OLLAMA_HOST`` above.
+    """
+    return (os.environ.get("OLLAMA_BASE_URL") or "").strip() or f"http://{OLLAMA_HOST}"
+
+
+# Back-compat module constant (kept for callers that imported it directly).
+OLLAMA_BASE_URL = _base_url()
+
+
+# ---- Host-helper delegation (Docker deploy) ---------------------------------
+def _hostctl_url() -> str:
+    return (os.environ.get("OLLAMA_HOSTCTL_URL") or "").strip().rstrip("/")
+
+
+def _hostctl_token() -> str:
+    path = (os.environ.get("OLLAMA_HOSTCTL_TOKEN_FILE")
+            or os.path.join(DATA_DIR, "ollama_hostctl.token"))
+    try:
+        with open(path, "r", encoding="ascii") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _hostctl_call(method: str, path: str, timeout: float = 25.0) -> dict | None:
+    """Proxy a request to the host helper; None if not configured/unreachable."""
+    base = _hostctl_url()
+    if not base:
+        return None
+    token = _hostctl_token()
+    if not token:
+        logger.warning("OLLAMA_HOSTCTL_URL set but no token file found; cannot delegate.")
+        return None
+    try:
+        resp = httpx.request(
+            method, f"{base}{path}",
+            headers={"X-Hostctl-Token": token},
+            timeout=timeout,
+        )
+        if resp.status_code in (200, 503, 409):
+            return resp.json()
+        logger.warning("ollama hostctl %s %s -> HTTP %s", method, path, resp.status_code)
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("ollama hostctl %s %s failed: %s", method, path, exc)
+    return None
 
 _PID_FILE = os.path.join(DATA_DIR, "ollama.pid")
 _LOG_FILE = os.path.join(DATA_DIR, "logs", "ollama.log")
@@ -106,7 +169,7 @@ def _clear_pid() -> None:
 def _probe(timeout: float = 1.5) -> dict | None:
     """Return Ollama's /api/version payload if reachable, else None."""
     try:
-        resp = httpx.get(f"{OLLAMA_BASE_URL}/api/version", timeout=timeout)
+        resp = httpx.get(f"{_base_url()}/api/version", timeout=timeout)
         if resp.status_code == 200:
             return resp.json()
     except (httpx.HTTPError, ValueError):
@@ -120,7 +183,28 @@ def status(timeout: float = 1.5) -> dict:
     ``managed`` is True only when the live server is the process we started
     (we hold its PID). A server we didn't start (e.g. the systemd service) reads
     as running-but-not-managed, and stop() will decline to kill it.
+
+    In the Docker deploy the lifecycle lives on the host helper, so we ask it
+    (it holds the real PID and sees the host binary); we still merge in our own
+    probe of the configured base URL as the source of truth for reachability.
     """
+    if _hostctl_url():
+        remote = _hostctl_call("GET", "/status", timeout=max(timeout, 5.0))
+        if remote is not None:
+            remote.setdefault("base_url", _base_url())
+            return remote
+        # Helper unreachable: still report reachability honestly via our probe.
+        version = _probe(timeout=timeout)
+        return {
+            "running": version is not None,
+            "managed": False,
+            "pid": None,
+            "version": (version or {}).get("version"),
+            "base_url": _base_url(),
+            "installed": version is not None,  # can't see the host binary from here
+            "models_path": None,
+        }
+
     version = _probe(timeout=timeout)
     running = version is not None
     pid = _read_pid()
@@ -144,7 +228,17 @@ def start(wait_timeout: float = 20.0) -> dict:
 
     Idempotent: if a server is already reachable, returns its status with
     ``started=False``. Returns ``{"ok": False, "error": ...}`` on failure.
+
+    Docker deploy: delegate to the host helper, which owns the host process.
     """
+    if _hostctl_url():
+        remote = _hostctl_call("POST", "/start", timeout=max(wait_timeout, 25.0) + 5.0)
+        if remote is not None:
+            return remote
+        return {"ok": False, "started": False,
+                "error": "Ollama host helper is unreachable. Is ollama-hostctl "
+                         "running on the host? (systemctl --user status ollama-hostctl)"}
+
     existing = _probe()
     if existing is not None:
         st = status()
@@ -219,7 +313,17 @@ def stop() -> dict:
 
     Refuses to kill a server we did not launch (e.g. the systemd service),
     since that is an externally-managed process the user controls elsewhere.
+
+    Docker deploy: delegate to the host helper, which owns the host process.
     """
+    if _hostctl_url():
+        remote = _hostctl_call("POST", "/stop", timeout=15.0)
+        if remote is not None:
+            return remote
+        return {"ok": False, "stopped": False,
+                "error": "Ollama host helper is unreachable. Is ollama-hostctl "
+                         "running on the host? (systemctl --user status ollama-hostctl)"}
+
     pid = _read_pid()
     if pid and pid_alive(pid):
         kill_process_tree(pid)
