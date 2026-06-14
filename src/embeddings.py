@@ -34,7 +34,11 @@ from typing import List, Optional
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "all-minilm:l6-v2"
-_DEFAULT_FASTEMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+# bge-small-en-v1.5 is the local FastEmbed lane default: same 384-dim as the old
+# all-MiniLM-L6-v2 (so no Chroma dimension conflict — the lane just re-embeds on
+# the fingerprint change), ~67MB, but higher retrieval quality on MTEB. Runs on
+# CPU, so it stays concurrent with a GPU custom lane.
+_DEFAULT_FASTEMBED_MODEL = "BAAI/bge-small-en-v1.5"
 
 
 class EmbeddingClient:
