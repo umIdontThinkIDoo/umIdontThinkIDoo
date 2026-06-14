@@ -2312,6 +2312,15 @@
                 <label class="settings-label">Max steps per message</label>
                 <input id="set-agentMaxRounds" type="text" inputmode="numeric" placeholder="20" class="settings-select" style="width:120px;">
               </div>
+              <div class="settings-row">
+                <label class="settings-label" title="Claude-like Reason→Draft→Critique→Revise→Validate around the selected model. Each stage is another generation — trades latency for quality. Applies to chat and agent turns; trivial greetings always stay cheap.">Process discipline</label>
+                <select id="set-processLevel" class="settings-select" style="width:180px;">
+                  <option value="off">Off (default)</option>
+                  <option value="auto">Auto (by task type)</option>
+                  <option value="light">Light (requirements + checklist)</option>
+                  <option value="full">Full (draft + critique + revise)</option>
+                </select>
+              </div>
               <div id="set-agentMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
             </div>
           </div>

@@ -101,6 +101,15 @@ DEFAULT_SETTINGS = {
     "research_run_timeout_seconds": 1800,
     "agent_max_tool_calls": 0,
     "agent_max_rounds": 20,  # per-message agent step cap (clamped 1..200)
+    # Process-discipline pipeline (src/process_pipeline.py): wraps each turn in
+    # Reason→Draft→Critique→Revise→Validate around the selected model. Each
+    # stage is another generation, so it trades latency for quality.
+    #   "off"   — dormant (default; no extra generations, zero behavior change).
+    #   "auto"  — per-turn heuristic (src/process_router.py) picks none/light/full.
+    #   "light" — force requirement extraction + completion checklist on
+    #             substantive turns (trivial greetings stay cheap).
+    #   "full"  — force draft + self-critique + revise + validate on those turns.
+    "process_level": "off",
     "agent_input_token_budget": 6000,
     # Ceiling on the *auto-derived* input budget that #1230 introduced. Has
     # no effect when `agent_input_token_budget` is explicitly set (the user's
