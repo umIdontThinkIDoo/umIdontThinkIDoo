@@ -281,7 +281,11 @@ class ChatProcessor:
         if use_web:
             try:
                 web_context, web_sources = comprehensive_web_search(
-                    message, time_filter=time_filter, return_sources=True
+                    message, time_filter=time_filter, return_sources=True,
+                    # Mirror fetched pages into this user's Library RAG so the
+                    # searched info is retrievable on later turns. Skipped in
+                    # incognito (no retention) and when RAG isn't in use.
+                    ingest_owner=(owner if not incognito else None),
                 )
                 preface.append(untrusted_context_message("web search results", web_context))
             except Exception as e:

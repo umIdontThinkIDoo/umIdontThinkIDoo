@@ -329,6 +329,7 @@ class ResearchHandler:
                 entry["result"] = result
                 entry["status"] = "done"
                 self._save_result(session_id, entry)
+                self._maybe_save_to_library(session_id, query, entry, result)
                 # Persist to DB via callback (ensures result survives even if SSE disconnected)
                 try:
                     sources = entry.get("sources", [])
@@ -349,6 +350,7 @@ class ResearchHandler:
                     )
                     entry["status"] = "done"
                     self._save_result(session_id, entry)
+                    self._maybe_save_to_library(session_id, query, entry, entry["result"])
                     try:
                         sources = self._extract_sources(researcher.findings) if researcher.findings else []
                         findings = self._extract_raw_findings(researcher.findings) if researcher.findings else []
@@ -373,6 +375,7 @@ class ResearchHandler:
                     )
                     entry["status"] = "done"
                     self._save_result(session_id, entry)
+                    self._maybe_save_to_library(session_id, query, entry, entry["result"])
                     try:
                         sources = self._extract_sources(researcher.findings) if researcher.findings else []
                         findings = self._extract_raw_findings(researcher.findings) if researcher.findings else []
@@ -574,6 +577,29 @@ class ResearchHandler:
                 path.write_text(json.dumps(data), encoding="utf-8")
             except Exception:
                 pass
+
+    def _maybe_save_to_library(self, session_id: str, query: str, entry: dict, report: str):
+        """Mirror a finished research report into the Library RAG (best-effort).
+
+        Owner-scoped so it joins the requesting user's retrievable documents.
+        Gated by the ``research_to_rag`` setting (default on); never raises.
+        Runs off-thread so it can't delay the research-complete callback.
+        """
+        try:
+            from src.settings import get_setting
+            if str(get_setting("research_to_rag", "true")).lower() in ("0", "false", "no", "off"):
+                return
+            if not (report or "").strip():
+                return
+            from src.web_ingest import ingest_research_report_async
+            ingest_research_report_async(
+                query=query,
+                report=report,
+                owner=entry.get("owner") or "",
+                session_id=session_id,
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("research_to_rag save skipped: %s", e)
 
     def _save_result(self, session_id: str, entry: dict):
         """Persist completed research result to disk."""
