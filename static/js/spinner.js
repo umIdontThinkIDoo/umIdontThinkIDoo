@@ -318,6 +318,51 @@ class Spinner {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
     }
+    if (this._progressRaf) {
+      cancelAnimationFrame(this._progressRaf);
+      this._progressRaf = null;
+    }
+  }
+
+  /**
+   * Attach a thin "the model is reading your prompt" progress bar beneath the
+   * spinner. We can't know the real prefill progress (no token-level signal
+   * before the first token), so the fill follows an ease-out asymptote: it
+   * advances quickly at first then slows, approaching `cap` but never reaching
+   * 100% until destroy() — which fires the instant the first token arrives.
+   * Purely a perceived-progress cue; it owns its own DOM and is cleaned up by
+   * stop()/destroy(), so every existing spinner-teardown path removes it for free.
+   *
+   * @param {{estMs?:number, cap?:number}} opts estMs = time constant (ms);
+   *   cap = max fraction to approach (0..1).
+   */
+  attachProgress(opts = {}) {
+    if (this._progressEl || !this.element || !this.element.parentNode) return;
+    const estMs = opts.estMs || 5000;
+    const cap = Math.min(opts.cap || 0.92, 0.99);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'ai-prefill-progress';
+    wrap.style.cssText =
+      'margin-top:6px;height:3px;width:140px;max-width:60%;border-radius:999px;' +
+      'overflow:hidden;background:color-mix(in srgb, var(--accent, #6c8cff) 18%, transparent);';
+    const fill = document.createElement('div');
+    fill.style.cssText =
+      'height:100%;width:0%;border-radius:999px;background:var(--accent, #6c8cff);' +
+      'transition:width .2s linear;';
+    wrap.appendChild(fill);
+    // Place it right after the spinner span so it sits under the status line.
+    this.element.parentNode.insertBefore(wrap, this.element.nextSibling);
+    this._progressEl = wrap;
+
+    const start = performance.now();
+    const tick = (now) => {
+      if (!this._progressEl) return;
+      const frac = cap * (1 - Math.exp(-(now - start) / estMs));
+      fill.style.width = (frac * 100).toFixed(1) + '%';
+      this._progressRaf = requestAnimationFrame(tick);
+    };
+    this._progressRaf = requestAnimationFrame(tick);
   }
 
   /**
@@ -349,6 +394,10 @@ class Spinner {
    */
   destroy() {
     this.stop();
+    if (this._progressEl && this._progressEl.parentNode) {
+      this._progressEl.parentNode.removeChild(this._progressEl);
+    }
+    this._progressEl = null;
     if (this.element && this.element.parentNode) {
       this.element.parentNode.removeChild(this.element);
     }

@@ -894,7 +894,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       const bodyDiv = holder.querySelector('.body');
       bodyDiv.appendChild(spinner.createElement());
       spinner.start();
-      
+      // Perceived-progress bar for the pre-first-token wait (the model reading
+      // the prompt — longest in agent mode with its ~9k-token tool prompt).
+      // Asymptotic fill; removed automatically when the spinner is destroyed on
+      // the first streamed token. Agent mode has the biggest prompt, so give it
+      // a longer time constant so the bar doesn't park at the cap too early.
+      try { spinner.attachProgress({ estMs: _isAgent ? 9000 : 5000 }); } catch (_) {}
+
       // Update spinner message based on mode
       if (el('web-toggle').checked && !_isAgent) {
         spinner.updateMessage('Searching web with ' + (searchModule ? searchModule.getProviderLabel() : 'SearXNG'));
