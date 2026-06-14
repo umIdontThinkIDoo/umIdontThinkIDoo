@@ -353,8 +353,16 @@ def comprehensive_web_search(
     language: Optional[str] = None,
     min_content_length: int = 0,
     return_sources: bool = False,
+    ingest_owner: Optional[str] = None,
 ):
-    """Perform comprehensive web search with content fetching and advanced filtering."""
+    """Perform comprehensive web search with content fetching and advanced filtering.
+
+    When ``ingest_owner`` is set and the ``web_search_to_rag`` setting is on, the
+    fetched page content is also mirrored (best-effort, off-thread) into the
+    shared Library RAG under that owner, so what was just searched becomes
+    immediately retrievable in plain chat. Default None = no ingest (unchanged
+    behavior for deep-research / agent callers).
+    """
     logger.info(f"Starting comprehensive search for: {query}")
     if time_filter:
         logger.info(f"Applying time filter: {time_filter}")
@@ -478,6 +486,18 @@ def comprehensive_web_search(
                 logger.error(f"Exception while fetching {url}: {str(e)}")
 
     logger.info(f"Successfully fetched content from {len(fetched_content)} pages")
+
+    # Mirror the freshly-fetched pages into the shared Library RAG so the model
+    # can retrieve them on later turns (not just this one). Owner-scoped,
+    # best-effort, and off the request thread — never blocks or breaks search.
+    if ingest_owner and fetched_content:
+        try:
+            from src.settings import get_setting
+            if str(get_setting("web_search_to_rag", "true")).lower() not in ("0", "false", "no", "off"):
+                from src.web_ingest import ingest_web_pages_async
+                ingest_web_pages_async(query, fetched_content, ingest_owner)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("web_search_to_rag ingest skipped: %s", e)
 
     # Format results
     output_parts = []
