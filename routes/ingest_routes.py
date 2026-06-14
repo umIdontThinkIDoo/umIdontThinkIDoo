@@ -271,6 +271,22 @@ def _process_file(file_entry: Dict, file_bytes: bytes, rag_manager, owner: str, 
                 with _state_lock:
                     file_entry["progress"] = pct
 
+            # Best-effort knowledge-graph enrichment. Runs in a background
+            # thread keyed to the same deterministic doc ids the RAG store
+            # derives, so it never blocks this upload finishing and a failure
+            # can't fault the ingest.
+            try:
+                from src import knowledge_graph as kg
+                from src.rag_vector import _generate_doc_id
+
+                kg.enrich_async(
+                    [(_generate_doc_id(text_chunk, owner), text_chunk)
+                     for text_chunk, _meta in docs],
+                    owner,
+                )
+            except Exception:
+                pass
+
         # Mirror PDFs into the Library so the user can confirm what was chunked
         # and actually read them. Only for PDFs (the viewer renders PDF pages),
         # only when chunks were produced, and best-effort (never blocks "done").

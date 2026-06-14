@@ -729,6 +729,82 @@ async function initImageSettings() {
   if (enabledToggle) enabledToggle.addEventListener('change', function() { syncImgDisabled(); saveSettings(); });
 }
 
+/* ── RAG Reranking ── */
+async function initRerankSettings() {
+  const enabledToggle = el('set-rerankEnabledToggle');
+  const modelSel = el('set-rerankModelSelect');
+  const msg = el('set-rerankMsg');
+  if (!enabledToggle && !modelSel) return;
+  const card = enabledToggle ? enabledToggle.closest('.admin-card') : null;
+  const configWrap = modelSel ? modelSel.closest('.settings-col') : null;
+
+  try {
+    const res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    const settings = await res.json();
+    if (enabledToggle) enabledToggle.checked = settings.rag_rerank_enabled !== false;
+    if (modelSel && settings.rag_rerank_model) modelSel.value = settings.rag_rerank_model;
+  } catch (e) { console.warn('Failed to load rerank settings', e); }
+
+  function syncDisabled() {
+    const off = enabledToggle && !enabledToggle.checked;
+    if (card) card.style.opacity = off ? '0.55' : '';
+    if (configWrap) configWrap.style.pointerEvents = off ? 'none' : '';
+  }
+  syncDisabled();
+
+  async function save() {
+    try {
+      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rag_rerank_enabled: enabledToggle ? enabledToggle.checked : true,
+          rag_rerank_model: modelSel ? modelSel.value : undefined,
+        }) });
+      if (msg) { msg.textContent = 'Saved'; setTimeout(() => { msg.textContent = ''; }, 2000); }
+    } catch (e) { if (msg) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; } }
+  }
+  if (enabledToggle) enabledToggle.addEventListener('change', function() { syncDisabled(); save(); });
+  if (modelSel) modelSel.addEventListener('change', save);
+}
+
+/* ── Knowledge Graph ── */
+async function initKgSettings() {
+  const enabledToggle = el('set-kgEnabledToggle');
+  const expandToggle = el('set-kgExpandToggle');
+  const msg = el('set-kgMsg');
+  if (!enabledToggle && !expandToggle) return;
+  const card = enabledToggle ? enabledToggle.closest('.admin-card') : null;
+  const configWrap = expandToggle ? expandToggle.closest('.settings-col') : null;
+
+  try {
+    const res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    const settings = await res.json();
+    if (enabledToggle) enabledToggle.checked = settings.kg_enabled !== false;
+    if (expandToggle) expandToggle.checked = settings.kg_expand_on_query !== false;
+  } catch (e) { console.warn('Failed to load knowledge-graph settings', e); }
+
+  function syncDisabled() {
+    const off = enabledToggle && !enabledToggle.checked;
+    if (card) card.style.opacity = off ? '0.55' : '';
+    if (configWrap) configWrap.style.pointerEvents = off ? 'none' : '';
+  }
+  syncDisabled();
+
+  async function save() {
+    try {
+      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kg_enabled: enabledToggle ? enabledToggle.checked : true,
+          kg_expand_on_query: expandToggle ? expandToggle.checked : true,
+        }) });
+      if (msg) { msg.textContent = 'Saved'; setTimeout(() => { msg.textContent = ''; }, 2000); }
+    } catch (e) { if (msg) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; } }
+  }
+  if (enabledToggle) enabledToggle.addEventListener('change', function() { syncDisabled(); save(); });
+  if (expandToggle) expandToggle.addEventListener('change', save);
+}
+
 /* ── Vision ── */
 async function initVisionSettings() {
   const vlSel = el('set-vlModelSelect');
@@ -2253,6 +2329,8 @@ function initAll() {
   initTeacherModel();
   initUtilityModel();
   initImageSettings();
+  initRerankSettings();
+  initKgSettings();
   initVisionSettings();
   initTtsSettings();
   initSttSettings();

@@ -190,7 +190,7 @@ function initializeEventListeners() {
   el('chat-history').addEventListener('wheel', (e) => {
     // Only disable auto-scroll when user scrolls UP (deltaY < 0)
     if (e.deltaY < 0) uiModule.setAutoScroll(false);
-  });
+  }, { passive: true });  // never preventDefaults → passive lets the compositor scroll without waiting on JS
   let _touchThrottled = false;
   el('chat-history').addEventListener('touchmove', () => {
     if (_touchThrottled) return;

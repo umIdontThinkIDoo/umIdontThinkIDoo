@@ -263,16 +263,23 @@ class VectorRAG:
             return []
 
         try:
+            from src import reranker
+
+            rerank_on = reranker.is_enabled()
             where_filter = {"owner": owner} if owner else None
             query_words = set(query.lower().split())
             candidates = []
+
+            # When reranking is on, recall a wider pool cheaply (over-fetch) so
+            # the cross-encoder has more candidates to re-score down to top-k.
+            pool_k = k * reranker.overfetch_multiplier() if rerank_on else k
 
             for lane, results in query_lanes(
                 self._lanes,
                 query,
                 n_results=lambda lane: min(
-                    (k * 6 if owner else k * 3),
-                    max(k, 20),
+                    (pool_k * 6 if owner else pool_k * 3),
+                    max(pool_k, 20),
                     lane.count(),
                 ),
                 where=where_filter,
@@ -303,13 +310,96 @@ class VectorRAG:
                     })
 
             candidates.sort(key=lambda c: c["similarity"], reverse=True)
-            top = dedupe_results(candidates, limit=k)
-            logger.info(f"Hybrid search for '{query[:60]}': {len(top)} results")
+
+            # Knowledge-graph expansion: pull in chunks one entity-hop away from
+            # the strongest hits so reranking can consider them. Gated, capped,
+            # and best-effort — a failure just means no expansion.
+            expanded = self._kg_expand(query, candidates, owner)
+            if expanded:
+                candidates.extend(expanded)
+
+            if rerank_on:
+                # Dedupe the wider pool first, then let the cross-encoder pick
+                # the final top-k. rerank() is a safe no-op (keeps order) if the
+                # model is unavailable, so this never returns fewer than before.
+                pool = dedupe_results(candidates, limit=pool_k + len(expanded))
+                top = reranker.rerank(query, pool, top_k=k)
+            else:
+                top = dedupe_results(candidates, limit=k)
+            logger.info(
+                "Hybrid search for '%s': %s results%s",
+                query[:60], len(top), " (reranked)" if rerank_on else "",
+            )
             return top
 
         except Exception as e:
             logger.error(f"search failed: {e}")
             return self._keyword_search_fallback(query, k, owner=owner)
+
+    def _kg_expand(self, query: str, candidates: List[Dict[str, Any]],
+                   owner: Optional[str]) -> List[Dict[str, Any]]:
+        """Return extra candidate dicts one entity-hop from the top hits.
+
+        Cheap (one bounded SQLite read + one Chroma get-by-ids) and fully
+        best-effort: any problem returns [] so search() is never affected.
+        """
+        try:
+            from src import knowledge_graph as kg
+
+            if not owner or not candidates or not kg.expansion_enabled():
+                return []
+
+            seeds = [c["id"] for c in candidates[:kg.DEFAULT_EXPAND_SEEDS]]
+            have = {c["id"] for c in candidates}
+            neighbor_ids = kg.neighbor_doc_ids(
+                seeds, owner, exclude=have, limit=kg.expand_limit())
+            if not neighbor_ids:
+                return []
+
+            # Resolve neighbour ids back to chunk text/metadata from any lane.
+            wanted = set(neighbor_ids)
+            fetched: Dict[str, Dict[str, Any]] = {}
+            query_words = set(query.lower().split())
+            for lane_name, collection in self._active_collections():
+                if not wanted:
+                    break
+                try:
+                    got = collection.get(
+                        ids=list(wanted), include=["documents", "metadatas"])
+                except Exception:
+                    continue
+                ids = got.get("ids") or []
+                for i, doc_id in enumerate(ids):
+                    if doc_id in fetched:
+                        continue
+                    doc_text = (got.get("documents") or [None] * len(ids))[i]
+                    meta = (got.get("metadatas") or [{}] * len(ids))[i] or {}
+                    if not doc_text:
+                        continue
+                    if owner and meta.get("owner") != owner:
+                        continue
+                    doc_words = set(doc_text.lower().split())
+                    overlap = len(query_words & doc_words)
+                    kw = overlap / len(query_words) if query_words else 0.0
+                    fetched[doc_id] = {
+                        "id": doc_id,
+                        "document": doc_text,
+                        "metadata": meta,
+                        "distance": None,
+                        # Modest first-stage score: keyword-only. Reranking (when
+                        # on) re-scores it fairly; when off it sorts below real
+                        # vector hits, so expansion can only add, never displace.
+                        "similarity": round(KEYWORD_WEIGHT * kw, 4),
+                        "vector_similarity": 0.0,
+                        "keyword_score": round(kw, 4),
+                        "embedding_lane": lane_name,
+                        "kg_expanded": True,
+                    }
+                    wanted.discard(doc_id)
+            return list(fetched.values())
+        except Exception as e:
+            logger.debug("kg expansion skipped: %s", e)
+            return []
 
     def _keyword_search_fallback(self, query: str, k: int = 5, owner: Optional[str] = None) -> List[Dict[str, Any]]:
         try:

@@ -171,6 +171,24 @@ DEFAULT_SETTINGS = {
         "Newsletters, marketing, automated digests, and FYI-only updates are "
         "NOT urgent."
     ),
+    # RAG cross-encoder reranking. After the hybrid vector+keyword recall stage,
+    # re-score the candidate pool with a local cross-encoder and keep the top-k.
+    # On by default — meaningfully better retrieval ordering for chat RAG, the
+    # Library, ingest queries, and web-ingested pages, all of which funnel
+    # through VectorRAG.search. See src/reranker.py.
+    "rag_rerank_enabled": True,
+    # Small/fast local ONNX cross-encoder (via fastembed, already a dep). Other
+    # valid choices: BAAI/bge-reranker-base, jinaai/jina-reranker-v2-base-multilingual.
+    "rag_rerank_model": "Xenova/ms-marco-MiniLM-L-6-v2",
+    # Candidate pool size = k * overfetch; the cross-encoder reranks it down to k.
+    "rag_rerank_overfetch": 5,
+    # Lightweight knowledge graph: entity/relation extraction at ingest (in a
+    # background thread, off the request path) + cheap 1-hop retrieval expansion
+    # at query time. Both gated; expansion can be turned off on its own.
+    "kg_enabled": True,
+    "kg_expand_on_query": True,
+    # Max neighbour chunks pulled into the candidate pool per query.
+    "kg_expand_limit": 5,
     # Keyboard shortcuts (action: key combination)
     "keybinds": {
         "search": "ctrl+k",

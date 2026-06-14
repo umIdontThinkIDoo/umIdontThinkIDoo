@@ -2,12 +2,44 @@
 // Strategy:
 //   - HTML (navigation): stale-while-revalidate. Instant open from cache,
 //     background refresh so the next open has latest HTML.
-//   - JS/CSS (/static/*.js|.css): network-first, cache fallback for offline.
-//     (So code/style edits show up on a normal reload, no manual cache clear.)
+//   - JS/CSS (/static/*.js|.css): stale-while-revalidate. Boot instantly from
+//     cache (no network wait for ~45 modules + the 1.1 MB stylesheet), refresh
+//     in the background. When a background fetch brings genuinely newer bytes
+//     (ETag/Last-Modified/size differ from what we served), tell open clients so
+//     they can surface a subtle "Update available — Reload" prompt. Net effect:
+//     fast boot AND edits still reach the user — one reload later instead of
+//     blocking every reload on the network.
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v329';
+const CACHE_NAME = 'odysseus-v330';
+
+// Has this SW instance already told clients about a background update? Debounced
+// so a deploy that changes many modules yields ONE prompt, not one per file.
+let _updateAnnounced = false;
+
+// Did the served bytes differ from the freshly-fetched ones? Compare the cheap
+// validators the server already sends (ETag, then Last-Modified, then size).
+// Conservative: only report "changed" when a validator is present and differs,
+// so we never nag on a normal unchanged reload.
+function _assetChanged(cachedRes, networkRes) {
+  if (!cachedRes || !networkRes) return false;
+  const ce = cachedRes.headers.get('ETag'), ne = networkRes.headers.get('ETag');
+  if (ce && ne) return ce !== ne;
+  const cl = cachedRes.headers.get('Last-Modified'), nl = networkRes.headers.get('Last-Modified');
+  if (cl && nl) return cl !== nl;
+  const cs = cachedRes.headers.get('Content-Length'), ns = networkRes.headers.get('Content-Length');
+  if (cs && ns) return cs !== ns;
+  return false;
+}
+
+function _announceUpdate() {
+  if (_updateAnnounced) return;
+  _updateAnnounced = true;
+  self.clients.matchAll({ includeUncontrolled: true }).then(clients => {
+    clients.forEach(c => c.postMessage({ type: 'assets-updated' }));
+  });
+}
 
 // Core shell precached on install so repeat opens are instant without any
 // network wait. Keep this list in sync with the <script type="module"> tags
@@ -113,17 +145,24 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  // JS/CSS: network-first — always try the network so code/style edits show up
-  // on a normal reload; fall back to cache only when offline.
+  // JS/CSS: stale-while-revalidate — serve the cached copy instantly so the app
+  // boots without waiting on the network, then refresh the cache in the
+  // background. If the refresh brought newer bytes, tell the page so it can
+  // offer a reload. First-ever load (cold cache) falls through to the network.
   if (url.pathname.startsWith('/static/') && /\.(js|css)(\?|$)/.test(url.pathname + url.search)) {
     e.respondWith(
-      fetch(e.request).then(res => {
-        if (res && res.ok) {
-          const copy = res.clone();
-          caches.open(CACHE_NAME).then(cache => cache.put(e.request, copy));
-        }
-        return res;
-      }).catch(() => caches.match(e.request))
+      caches.open(CACHE_NAME).then(async cache => {
+        const cached = await cache.match(e.request);
+        const networkFetch = fetch(e.request).then(res => {
+          if (res && res.ok) {
+            if (_assetChanged(cached, res)) _announceUpdate();
+            cache.put(e.request, res.clone());
+          }
+          return res;
+        }).catch(() => cached);
+        // Cached → instant. No cache yet → wait for the network this once.
+        return cached || networkFetch;
+      })
     );
     return;
   }
