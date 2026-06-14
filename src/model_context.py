@@ -7,6 +7,7 @@ Provides token estimation for context usage tracking.
 
 import logging
 import sys
+import time
 from typing import Dict, List, Optional, Tuple
 
 from urllib.parse import urlparse
@@ -210,6 +211,15 @@ KNOWN_CONTEXT_WINDOWS = {
 # ---------------------------------------------------------------------------
 _context_cache: Dict[Tuple[str, str], int] = {}
 
+# Local endpoints aren't cached permanently (they can restart with a different
+# --max-model-len under the same model id), but re-querying /slots — a blocking
+# HTTP round-trip — on EVERY chat turn is pure latency on the response path
+# (get_context_length runs inside maybe_compact for every message). A short TTL
+# cache keeps the steady-state per-turn cost at zero while still picking up a
+# server restart within ~TTL seconds. Maps cache_key -> (ctx, expires_monotonic).
+_local_context_cache: Dict[Tuple[str, str], Tuple[int, float]] = {}
+_LOCAL_CONTEXT_TTL = 60.0  # seconds
+
 
 def get_context_length(endpoint_url: str, model: str) -> int:
     """Get the context window size for a model.
@@ -228,11 +238,19 @@ def get_context_length(endpoint_url: str, model: str) -> int:
     if not is_local and cache_key in _context_cache:
         return _context_cache[cache_key]
 
+    # Local: serve from the short-TTL cache so we don't pay a /slots round-trip
+    # every turn. Past the TTL we re-query, so a restarted server with a new
+    # --max-model-len is picked up within ~_LOCAL_CONTEXT_TTL seconds.
+    if is_local:
+        hit = _local_context_cache.get(cache_key)
+        if hit is not None and hit[1] > time.monotonic():
+            return hit[0]
+
     ctx = _query_context_length(endpoint_url, model)
+    if is_local:
+        _local_context_cache[cache_key] = (ctx, time.monotonic() + _LOCAL_CONTEXT_TTL)
     # Only cache non-default values to allow retry on next request.
-    # Local endpoints can restart with a different --max-model-len while keeping
-    # the same model id, so always re-query them instead of serving stale cache.
-    if not is_local and (ctx != DEFAULT_CONTEXT or configured_kind in ("api", "proxy")):
+    elif ctx != DEFAULT_CONTEXT or configured_kind in ("api", "proxy"):
         _context_cache[cache_key] = ctx
     logger.info(f"Context length for {model}: {ctx}")
     return ctx

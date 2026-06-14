@@ -186,8 +186,12 @@ class TestLookupKnown:
 class TestGetContextLength:
     def setup_method(self):
         model_context._context_cache.clear()
+        model_context._local_context_cache.clear()
 
-    def test_local_endpoint_requeries_same_model_after_restart(self, monkeypatch):
+    def test_local_endpoint_caches_within_ttl_then_requeries_after_restart(self, monkeypatch):
+        """Local lookups are TTL-cached so we don't pay a /slots round-trip every
+        turn, but a server restart (new --max-model-len) is still picked up once
+        the TTL lapses."""
         calls = []
 
         def fake_query(endpoint_url, model):
@@ -199,11 +203,18 @@ class TestGetContextLength:
         endpoint = "http://127.0.0.1:8000/v1/chat/completions"
         model = "Qwen/Qwen3-14B"
 
+        # Two back-to-back turns within the TTL window: only one real query.
         first = model_context.get_context_length(endpoint, model)
         second = model_context.get_context_length(endpoint, model)
-
         assert first == 8192
-        assert second == 27000
+        assert second == 8192
+        assert len(calls) == 1
+
+        # TTL lapses (simulate a restart later) → re-query picks up the new window.
+        cached_ctx, _ = model_context._local_context_cache[(endpoint, model)]
+        model_context._local_context_cache[(endpoint, model)] = (cached_ctx, 0.0)
+        third = model_context.get_context_length(endpoint, model)
+        assert third == 27000
         assert len(calls) == 2
 
     def test_remote_endpoint_keeps_cached_context(self, monkeypatch):

@@ -1,4 +1,5 @@
 
+import copy
 import json
 import logging
 import os
@@ -36,6 +37,14 @@ class MemoryManager:
     def __init__(self, data_dir: str):
         self.memory_file = os.path.join(data_dir, "memory.json")
         self.ensure_file_exists()
+        # Parsed-memory cache keyed on the file's (mtime_ns, size). load_all()
+        # runs on every chat turn (memory injection), and re-reading + JSON
+        # parsing + validating the whole file each time is pure latency on the
+        # response path. save() rewrites the file via os.replace, which bumps
+        # mtime, so the cache self-invalidates on any write — including an
+        # external editor — with no explicit invalidation needed.
+        self._load_cache: List[Dict] = None
+        self._load_cache_sig = None
         
     def extract_memory_from_chat(self, chat_history: List[Dict], session_id: str = None) -> List[Dict]:
         """
@@ -111,15 +120,36 @@ class MemoryManager:
                 json.dump([], f, ensure_ascii=False, indent=2)
     
     def load_all(self) -> List[Dict]:
-        """Load all memory entries from JSON file (unfiltered)."""
+        """Load all memory entries from JSON file (unfiltered).
+
+        Cached on the file's (mtime_ns, size): unchanged file → return a copy of
+        the already-parsed list instead of re-reading and re-parsing it. The copy
+        keeps callers that mutate-then-save (claim_ownerless, increment_uses) from
+        ever aliasing the cached objects.
+        """
         if not os.path.exists(self.memory_file):
             return []
+
+        sig = None
+        try:
+            st = os.stat(self.memory_file)
+            sig = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            sig = None
+
+        if sig is not None and sig == self._load_cache_sig and self._load_cache is not None:
+            return copy.deepcopy(self._load_cache)
 
         try:
             with open(self.memory_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, list):
-                    return self._validate_entries(data)
+                    validated = self._validate_entries(data)
+                    if sig is not None:
+                        self._load_cache = validated
+                        self._load_cache_sig = sig
+                        return copy.deepcopy(validated)
+                    return validated
         except (json.JSONDecodeError, PermissionError) as e:
             logger.error("Error loading memory.json: %s", e)
             return self._migrate_from_legacy()
