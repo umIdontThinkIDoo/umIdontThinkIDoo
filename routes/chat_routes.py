@@ -62,6 +62,66 @@ def _stream_set(session_id: str, **fields) -> None:
     rec.update(fields)
 
 
+_PROC_LEVEL_ORDER = ("none", "light", "full")
+
+
+def _resolve_process_level(message, *, agent_mode: bool, cap: str = "full") -> str:
+    """Resolve the process-discipline level for a turn via the admin setting +
+    router heuristic. Returns 'none'|'light'|'full'. Never raises (defaults to
+    'none' so the feature is inert on any error). ``cap`` clamps the maximum —
+    agent mode caps at 'light' because draft/critique/revise doesn't fit a
+    tool-using loop, but requirement guidance + validation still help."""
+    try:
+        from src.settings import get_setting
+        from src.process_router import resolve_level
+        level = resolve_level(message or "", get_setting("process_level", "off"),
+                              agent_mode=agent_mode)
+        if _PROC_LEVEL_ORDER.index(level) > _PROC_LEVEL_ORDER.index(cap):
+            level = cap
+        return level
+    except Exception as e:  # feature must never break a turn
+        logger.debug("process_level resolve skipped: %s", e)
+        return "none"
+
+
+async def _maybe_process_prepare(sess, messages, message, *, agent_mode: bool,
+                                 temperature: float, cap: str = "full"):
+    """Run the pre-stream process stages if enabled. Returns a PipelinePrep
+    (with augmented messages + trace) or None when the feature is inert."""
+    level = _resolve_process_level(message, agent_mode=agent_mode, cap=cap)
+    if level == "none":
+        return None
+    try:
+        from src import process_pipeline
+        prep = await process_pipeline.prepare(
+            sess.endpoint_url, sess.model, messages, level=level,
+            headers=sess.headers, temperature=temperature,
+        )
+        return prep if prep.level != "none" else None
+    except Exception as e:
+        logger.debug("process_pipeline.prepare skipped: %s", e)
+        return None
+
+
+async def _emit_process_validation(prep, sess, message, final_answer):
+    """Run the post-answer validation stage and yield its SSE trace event (if any).
+    Generator so callers can ``async for ev in _emit_process_validation(...)``."""
+    if not prep or not (final_answer or "").strip():
+        return
+    try:
+        from src import process_pipeline
+        val = await process_pipeline.validate(
+            sess.endpoint_url, sess.model,
+            requirements=getattr(prep, "requirements", ""),
+            user_text=message or "", final_answer=final_answer,
+            headers=sess.headers,
+        )
+        if val:
+            yield f'data: {json.dumps(val.as_dict())}\n\n'
+    except Exception as e:
+        logger.debug("process_pipeline.validate skipped: %s", e)
+
+
 def _session_url_matches_endpoint(session_url: str, endpoint_base: str) -> bool:
     if not session_url or not endpoint_base:
         return False
@@ -392,16 +452,34 @@ def setup_chat_routes(
             except Exception as e:
                 logger.error(f"Research failed: {e}")
 
-        reply = await llm_call_async(
-            sess.endpoint_url,
-            sess.model,
-            ctx.messages,
-            headers=sess.headers,
-            temperature=ctx.preset.temperature,
-            max_tokens=ctx.preset.max_tokens,
-            prompt_type=preset_id,
-            session_id=session,
-        )
+        # Process-discipline pipeline (dormant unless admin enables process_level).
+        # Returns a plain single generation when level resolves to 'none'.
+        _proc_level = _resolve_process_level(message, agent_mode=False)
+        _proc_trace = []
+        if _proc_level != "none":
+            try:
+                from src import process_pipeline
+                _pr = await process_pipeline.run(
+                    sess.endpoint_url, sess.model, ctx.messages, level=_proc_level,
+                    headers=sess.headers, temperature=ctx.preset.temperature,
+                    max_tokens=ctx.preset.max_tokens,
+                )
+                reply = _pr["answer"]
+                _proc_trace = _pr.get("trace", [])
+            except Exception as e:
+                logger.debug("process_pipeline.run skipped: %s", e)
+                _proc_level = "none"
+        if _proc_level == "none":
+            reply = await llm_call_async(
+                sess.endpoint_url,
+                sess.model,
+                ctx.messages,
+                headers=sess.headers,
+                temperature=ctx.preset.temperature,
+                max_tokens=ctx.preset.max_tokens,
+                prompt_type=preset_id,
+                session_id=session,
+            )
         _clean_reply, _clean_md = clean_thinking_for_save(reply, {"model": sess.model})
         sess.add_message(ChatMessage("assistant", _clean_reply, metadata=_clean_md))
 
@@ -418,7 +496,10 @@ def setup_chat_routes(
             allow_background_extraction=not tool_policy.block_all_tool_calls,
         )
 
-        return {"response": reply}
+        _resp = {"response": reply}
+        if _proc_trace:
+            _resp["process_trace"] = _proc_trace
+        return _resp
 
     # ------------------------------------------------------------------ #
     # POST /api/chat_stream
@@ -975,6 +1056,17 @@ def setup_chat_routes(
                 _requested_model = sess.model
                 _actual_model = None
                 # ── Chat mode: call stream_llm directly, NO tools, NO document access ──
+                # Process-discipline pre-stages (dormant unless admin sets
+                # process_level). Augments `messages` so the streamed final answer
+                # is the revised one, and emits collapsible trace events first.
+                _proc_prep = await _maybe_process_prepare(
+                    sess, messages, message, agent_mode=False,
+                    temperature=ctx.preset.temperature,
+                )
+                if _proc_prep:
+                    messages = _proc_prep.messages
+                    for _pev in _proc_prep.trace:
+                        yield f'data: {json.dumps(_pev.as_dict())}\n\n'
                 try:
                     _chat_candidates = [(sess.endpoint_url, sess.model, sess.headers)] + _fallback_candidates
                     async for chunk in stream_llm_with_fallback(
@@ -1081,6 +1173,10 @@ def setup_chat_routes(
                                     owner=_user,
                                     allow_background_extraction=not tool_policy.block_all_tool_calls,
                                 )
+                            # Process-discipline completion checklist (post-answer).
+                            async for _vev in _emit_process_validation(
+                                _proc_prep, sess, message, full_response):
+                                yield _vev
                             _stream_set(session, status="done")
                             yield chunk
                 except (asyncio.CancelledError, GeneratorExit):
@@ -1118,6 +1214,19 @@ def setup_chat_routes(
                     except (TypeError, ValueError):
                         _max_rounds = _DEFAULT_ROUNDS
                     _max_rounds = max(1, min(_max_rounds, 200))
+
+                    # Process-discipline: agent mode caps at 'light' (requirement
+                    # guidance + post-run validation). Draft/critique/revise don't
+                    # map onto a tool-using loop, so only the requirement preface
+                    # is injected here; the checklist runs after the loop finishes.
+                    _proc_prep = await _maybe_process_prepare(
+                        sess, messages, message, agent_mode=True,
+                        temperature=ctx.preset.temperature, cap="light",
+                    )
+                    if _proc_prep:
+                        messages = _proc_prep.messages
+                        for _pev in _proc_prep.trace:
+                            yield f'data: {json.dumps(_pev.as_dict())}\n\n'
 
                     async for chunk in stream_agent_loop(
                         sess.endpoint_url,
@@ -1213,6 +1322,10 @@ def setup_chat_routes(
                                     extract_skills=user_requested_agent,
                                     allow_background_extraction=not tool_policy.block_all_tool_calls,
                                 )
+                            # Process-discipline completion checklist (post-answer).
+                            async for _vev in _emit_process_validation(
+                                _proc_prep, sess, message, full_response):
+                                yield _vev
                             _stream_set(session, status="done")
                             yield chunk
                 except (asyncio.CancelledError, GeneratorExit):

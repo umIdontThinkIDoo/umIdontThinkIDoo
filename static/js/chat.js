@@ -1040,6 +1040,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       let metrics = null;
       let isThinking = false;
       let thinkingStartTime = null;
+      let _procWrap = null;  // collapsible process-discipline trace container (this turn)
       // Streaming TTS: synthesize sentence-by-sentence during streaming
       const streamingTTS = !!(window.aiTTSManager && window.aiTTSManager.autoPlay && window.aiTTSManager.available);
       if (streamingTTS) window.aiTTSManager.streamingStart();
@@ -1974,6 +1975,35 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // can be edited/deleted immediately, without reloading the chat.
                 if (_isBg) continue;
                 if (currentHolder && json.id) currentHolder.dataset.dbId = json.id;
+
+              } else if (json.type === 'process_trace') {
+                // Claude-like process discipline (requirements / critique /
+                // validation). Render as a collapsible block above the answer.
+                // Unknown to older clients → silently ignored, so non-breaking.
+                if (_isBg) continue;
+                try {
+                  const chatBox = document.getElementById('chat-history');
+                  if (!_procWrap) {
+                    _procWrap = document.createElement('div');
+                    _procWrap.className = 'process-trace-wrap msg msg-ai';
+                    const hdr = document.createElement('div');
+                    hdr.className = 'process-trace-title';
+                    hdr.textContent = '⚙ Process';
+                    _procWrap.appendChild(hdr);
+                    if (chatBox) chatBox.appendChild(_procWrap);
+                  }
+                  const det = document.createElement('details');
+                  det.className = 'process-trace-item';
+                  const sum = document.createElement('summary');
+                  sum.textContent = json.title || (json.stage || 'step');
+                  const pre = document.createElement('pre');
+                  pre.className = 'process-trace-body';
+                  pre.textContent = json.content || '';
+                  det.appendChild(sum);
+                  det.appendChild(pre);
+                  _procWrap.appendChild(det);
+                  if (chatBox) chatBox.scrollTop = chatBox.scrollHeight;
+                } catch (_e) { /* trace is best-effort; never break the stream */ }
 
               } else if (json.type === 'tool_start') {
                 if (_isBg) continue;
