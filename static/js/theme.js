@@ -419,18 +419,21 @@ const _CANVAS_PATTERNS = { synapse: _initSynapse, rain: _initRain, constellation
 
 export function applyBgEffectColor(color) {
   document.documentElement.style.setProperty('--bg-effect-color', color || '');
+  _invalidateBgVars();
 }
 
 export function applyBgEffectIntensity(v) {
   // v is 0..1. Default 1 (full intensity) when missing.
   const n = (v === undefined || v === null || isNaN(v)) ? 1 : Math.max(0, Math.min(1, Number(v)));
   document.documentElement.style.setProperty('--bg-effect-intensity', String(n));
+  _invalidateBgVars();
 }
 
 export function applyBgEffectSize(v) {
   // v is a multiplier 0.3..2.5. Default 1 when missing.
   const n = (v === undefined || v === null || isNaN(v)) ? 1 : Math.max(0.2, Math.min(3, Number(v)));
   document.documentElement.style.setProperty('--bg-effect-size', String(n));
+  _invalidateBgVars();
 }
 
 /** Toggle the global "frosted glass" look — applies a translucent + blurred
@@ -440,10 +443,42 @@ export function applyFrostedGlass(on) {
   document.body.classList.toggle('theme-frosted', !!on);
 }
 
+// Cached reads of the background-effect CSS vars. getComputedStyle() forces a
+// synchronous style recalc of the root element; the canvas background loops
+// below run at ~60fps and used to call it 2-3x inside every draw() frame, which
+// janked the WHOLE page — scrolling and typing included, not just the canvas.
+// These vars only change when the user edits theme/effect settings, so refresh
+// the cache a few times a second and serve the cached values to every frame.
+let _bgVarCache = null;
+let _bgVarCacheAt = 0;
+function _bgVars() {
+  const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  if (!_bgVarCache || now - _bgVarCacheAt > 400) {
+    const s = getComputedStyle(document.documentElement);
+    const inten = parseFloat(s.getPropertyValue('--bg-effect-intensity'));
+    const size = parseFloat(s.getPropertyValue('--bg-effect-size'));
+    _bgVarCache = {
+      color: s.getPropertyValue('--bg-effect-color').trim(),
+      fg: s.getPropertyValue('--fg').trim(),
+      bg: s.getPropertyValue('--bg').trim(),
+      intensity: isNaN(inten) ? 1 : inten,
+      size: isNaN(size) ? 1 : size,
+    };
+    _bgVarCacheAt = now;
+  }
+  return _bgVarCache;
+}
+// Invalidate immediately when settings change so effects update without waiting
+// for the cache window (applyBgPattern / intensity+color setters call this).
+function _invalidateBgVars() { _bgVarCache = null; }
+function _bgEffectColor(fallback) {
+  const v = _bgVars();
+  return v.color || v.fg || (fallback || '#9cdef2');
+}
+
 // Read current size multiplier for JS effects (canvas-based).
 function _getEffectSize() {
-  const v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-size'));
-  return isNaN(v) ? 1 : v;
+  return _bgVars().size;
 }
 
 // Patterns where the intensity/size sliders have no visible effect.
@@ -1545,8 +1580,7 @@ function _initSynapse() {
   window.addEventListener('resize', _onResize);
 
   function getColor() {
-    const s = getComputedStyle(document.documentElement);
-    return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2';
+    return _bgEffectColor('#9cdef2');
   }
 
   function spawnPulse() {
@@ -1636,8 +1670,7 @@ function _initRain() {
   window.addEventListener('resize', _onResize);
 
   function getColor() {
-    const s = getComputedStyle(document.documentElement);
-    return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2';
+    return _bgEffectColor('#9cdef2');
   }
 
   function spawn() {
@@ -1656,8 +1689,7 @@ function _initRain() {
     ctx.clearRect(0, 0, W, H);
     const c = getColor();
     // Intensity also controls rain speed + spawn rate (feels slower/lighter when dim)
-    const intenCss = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-intensity'));
-    const inten = isNaN(intenCss) ? 1 : intenCss;
+    const inten = _bgVars().intensity;
     const speedMult = 0.35 + inten * 0.65;
     const sizeMult = _getEffectSize();
 
@@ -1727,8 +1759,7 @@ function _initConstellations() {
   window.addEventListener('resize', _onResize);
 
   function getColor() {
-    const s = getComputedStyle(document.documentElement);
-    return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2';
+    return _bgEffectColor('#9cdef2');
   }
 
   let t = 0;
@@ -1814,8 +1845,8 @@ function _initPerlinFlow() {
   resize();
   const _onResize = () => resize();
   window.addEventListener('resize', _onResize);
-  function getColor() { const s = getComputedStyle(document.documentElement); return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2'; }
-  function getBg() { return getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#282c34'; }
+  function getColor() { return _bgEffectColor('#9cdef2'); }
+  function getBg() { return _bgVars().bg || '#282c34'; }
   let _cachedBg = '', _fadeStyle = '';
   function getFade() {
     const bg = getBg();
@@ -1880,7 +1911,7 @@ function _initPetals() {
   resize();
   const _onResize = () => resize();
   window.addEventListener('resize', _onResize);
-  function getColor() { const s = getComputedStyle(document.documentElement); return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2'; }
+  function getColor() { return _bgEffectColor('#9cdef2'); }
   function draw() {
     if (!document.body.classList.contains('bg-pattern-petals')) { window.removeEventListener('resize', _onResize); canvas.remove(); return; }
     requestAnimationFrame(draw);
@@ -1931,7 +1962,7 @@ function _initSparkles() {
   resize();
   const _onResize = () => resize();
   window.addEventListener('resize', _onResize);
-  function getColor() { const s = getComputedStyle(document.documentElement); return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2'; }
+  function getColor() { return _bgEffectColor('#9cdef2'); }
   function drawStar(x, y, r, c, alpha) {
     ctx.save(); ctx.translate(x, y); ctx.fillStyle = c; ctx.globalAlpha = alpha;
     // 4-point star
@@ -2002,8 +2033,7 @@ function _initEmbers() {
   const _onResize = () => resize();
   window.addEventListener('resize', _onResize);
   function getColor() {
-    const s = getComputedStyle(document.documentElement);
-    return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#c9a95a';
+    return _bgEffectColor('#c9a95a');
   }
   function rgba(hex, a) {
     const { r, g, b } = hexToRgb(hex) || { r: 0, g: 0, b: 0 };
