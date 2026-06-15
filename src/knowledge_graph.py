@@ -261,6 +261,25 @@ def enrich_documents(docs: Sequence[Tuple[str, str]], owner: str) -> int:
     return enriched
 
 
+def existing_doc_ids(owner: str) -> set:
+    """Doc ids already enriched for ``owner`` so a backfill can skip them.
+
+    Makes the bulk backfill idempotent + resumable: re-running after an
+    interrupt only processes chunks that never made it into the graph.
+    """
+    conn = _connect()
+    if conn is None:
+        return set()
+    try:
+        with _conn_lock:
+            rows = conn.execute(
+                "SELECT DISTINCT doc_id FROM mentions WHERE owner = ?", (owner,)
+            ).fetchall()
+        return {r[0] for r in rows}
+    except Exception:
+        return set()
+
+
 def enrich_async(docs: Sequence[Tuple[str, str]], owner: str) -> None:
     """Fire-and-forget background enrichment so ingest never waits on the LLM."""
     if not is_enabled() or not docs:

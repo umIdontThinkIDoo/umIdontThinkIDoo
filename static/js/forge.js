@@ -523,6 +523,8 @@ function _buildIngest(body) {
   html += '<button class="cookbook-btn" id="fg-ingest-stop-btn" style="display:none" title="Finish the current file, then stop and defer the rest">Stop</button>';
   html += '<button class="cookbook-btn" id="fg-ingest-clear-btn" style="opacity:0.6" title="Clear results">Clear</button>';
   html += '</div>';
+  html += '<p class="memory-desc" style="margin:10px 0 6px;">Backfill the knowledge graph from documents already indexed (entities + relations for sharper retrieval). Runs in the background and pauses chat while the GPU works — interrupt anytime.</p>';
+  html += '<button class="cookbook-btn" id="fg-ingest-kg-btn" style="width:100%" title="Extract entities/relations for every already-ingested chunk">Backfill Knowledge Graph</button>';
   html += '<input type="file" id="fg-ingest-file-input" multiple accept=".pdf,.epub,.txt,.md,.docx,.rst,.csv" style="display:none">';
   html += '<input type="file" id="fg-ingest-folder-input" multiple webkitdirectory style="display:none">';
   html += '<div class="ingest-overall" id="fg-ingest-overall" style="display:none">';
@@ -553,6 +555,29 @@ function _buildIngest(body) {
       }
     } catch (_) {}
   });
+
+  const kgBtn = body.querySelector('#fg-ingest-kg-btn');
+  if (kgBtn) {
+    kgBtn.addEventListener('click', async () => {
+      if (!confirm('Backfill the knowledge graph for every already-ingested document?\n\nThis runs the utility model over each chunk — it can take a while and pauses chat while the GPU works. You can interrupt at any time from the chat banner.')) return;
+      kgBtn.disabled = true;
+      const prev = kgBtn.textContent;
+      kgBtn.textContent = 'Starting…';
+      try {
+        const r = await fetch(`${API}/api/ingest/backfill-kg`, { method: 'POST', credentials: 'same-origin' });
+        if (r.ok) {
+          kgBtn.textContent = 'Backfill running — see chat banner';
+        } else {
+          const d = await r.json().catch(() => ({}));
+          alert('Could not start backfill: ' + (d.detail || r.statusText));
+          kgBtn.disabled = false; kgBtn.textContent = prev;
+        }
+      } catch (e) {
+        alert('Could not start backfill: ' + e.message);
+        kgBtn.disabled = false; kgBtn.textContent = prev;
+      }
+    });
+  }
 
   pickFiles.addEventListener('click', () => fileInput.click());
   pickFolder.addEventListener('click', () => folderInput.click());

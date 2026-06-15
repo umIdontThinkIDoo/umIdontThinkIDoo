@@ -9,7 +9,30 @@ from datetime import datetime
 from typing import Dict, Any, AsyncGenerator, List
 
 from fastapi import APIRouter, Request, HTTPException, Form, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
+
+
+def _ingest_lock_response():
+    """If a heavy ingest / KG backfill is running, chat is paused so the GPU can
+    run flat-out. Returns a 423 JSONResponse to send back, or None when free.
+    The ``message`` key is what the chat UI's error parser surfaces verbatim."""
+    try:
+        from src import ingest_gate
+        if not ingest_gate.is_active():
+            return None
+        snap = ingest_gate.snapshot()
+        label = snap.get("label") or "Library ingest"
+        return JSONResponse(
+            status_code=423,
+            content={
+                "message": f"{label} in progress ({snap.get('pct', 0)}%). "
+                           f"Chat is paused while the GPU finishes — click "
+                           f"“Interrupt ASAP” to stop it and free up.",
+                "ingest_locked": True,
+            },
+        )
+    except Exception:
+        return None
 from pydantic import ValidationError
 
 from core.models import ChatMessage
@@ -375,6 +398,9 @@ def setup_chat_routes(
     # ------------------------------------------------------------------ #
     @router.post("/api/chat", response_model=Dict[str, str])
     async def chat_endpoint(request: Request, chat_request: ChatRequest) -> Dict[str, str]:
+        _locked = _ingest_lock_response()
+        if _locked is not None:
+            return _locked
         _set_user_time_from_request(request)
 
         message = chat_request.message
@@ -506,6 +532,9 @@ def setup_chat_routes(
     # ------------------------------------------------------------------ #
     @router.post("/api/chat_stream")
     async def chat_stream(request: Request) -> StreamingResponse:
+        _locked = _ingest_lock_response()
+        if _locked is not None:
+            return _locked
         body = None
         try:
             if request.headers.get("content-type", "").startswith("application/json"):

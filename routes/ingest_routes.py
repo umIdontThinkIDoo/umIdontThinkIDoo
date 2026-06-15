@@ -316,24 +316,135 @@ def _process_file(file_entry: Dict, file_bytes: bytes, rag_manager, owner: str, 
 
 def _run_ingest_job(files_data: List[tuple], rag_manager, owner: str, upload_handler=None):
     """files_data: list of (file_entry_dict, bytes)"""
+    from src import ingest_gate
     with _state_lock:
         _state["running"] = True
+    # Open the shared gate so chat pauses while we saturate the GPU with
+    # embedding + KG extraction. try/finally guarantees the gate closes even if
+    # a file blows up, so chat can never get stuck locked.
+    ingest_gate.activate("upload", "Ingesting your library", total=len(files_data))
 
-    for file_entry, file_bytes in files_data:
-        # Graceful stop: honour a stop request at the book boundary — finish the
-        # files already done, never abandon one mid-embed. Whatever hasn't
-        # started is marked "deferred" so the UI lists what to re-ingest later
-        # (re-selecting the folder is idempotent: done books are skipped).
-        with _state_lock:
-            if _state["stop_requested"]:
-                for entry, _ in files_data:
-                    if entry.get("status") == "queued":
-                        entry["status"] = "deferred"
-                        _state["done_files"] += 1
-                _state["running"] = False
-                _state["stop_requested"] = False
+    try:
+        for idx, (file_entry, file_bytes) in enumerate(files_data):
+            # Graceful stop ("Interrupt ASAP"): honour a stop request — from the
+            # cookbook UI (_state) or the global gate banner — at the book
+            # boundary. Finish the files already done, never abandon one
+            # mid-embed. Whatever hasn't started is marked "deferred" so the UI
+            # lists what to re-ingest later (re-selecting the folder is
+            # idempotent: done books are skipped).
+            with _state_lock:
+                stop = _state["stop_requested"]
+            if stop or ingest_gate.stop_requested():
+                with _state_lock:
+                    for entry, _ in files_data:
+                        if entry.get("status") == "queued":
+                            entry["status"] = "deferred"
+                            _state["done_files"] += 1
+                    _state["running"] = False
+                    _state["stop_requested"] = False
                 return
-        _process_file(file_entry, file_bytes, rag_manager, owner, upload_handler)
+            ingest_gate.update(done=idx, current=file_entry.get("name", ""))
+            _process_file(file_entry, file_bytes, rag_manager, owner, upload_handler)
+            ingest_gate.update(done=idx + 1)
+    finally:
+        ingest_gate.deactivate()
+
+
+# ── Knowledge-graph backfill ───────────────────────────────────────────────────
+#
+# One-shot enrichment of chunks that were embedded BEFORE the utility model was
+# configured (so they never got entities/relations). Reuses the same shared gate
+# as upload ingest: chat pauses, the GPU runs flat-out on extraction, and the
+# "Interrupt ASAP" button halts it at the next batch boundary. Idempotent +
+# resumable — already-enriched doc ids are skipped, so re-running after an
+# interrupt only picks up what's left.
+
+def _owner_chunks(rag_manager, owner: str) -> List[tuple]:
+    """All (doc_id, text) pairs for ``owner`` across every Chroma collection.
+
+    Uses the stored doc ids directly (not regenerated) so KG neighbour
+    resolution lines up with what query-time expansion reads back.
+    """
+    out: List[tuple] = []
+    seen = set()
+    try:
+        collections = rag_manager._collections_for_delete()
+    except Exception:
+        collections = rag_manager._active_collections() if hasattr(rag_manager, "_active_collections") else []
+    for _lane, col in collections:
+        if col is None:
+            continue
+        try:
+            got = col.get(where={"owner": owner}, include=["documents"])
+        except Exception as exc:
+            logger.warning("kg backfill: chunk fetch failed for lane: %s", exc)
+            continue
+        ids = got.get("ids") or []
+        docs = got.get("documents") or []
+        for i, did in enumerate(ids):
+            if did in seen:
+                continue
+            txt = docs[i] if i < len(docs) else ""
+            if txt and txt.strip():
+                seen.add(did)
+                out.append((did, txt))
+    return out
+
+
+def _enrich_batch_concurrent(batch: List[tuple], owner: str, kg, workers: int = 4) -> None:
+    """Extract + store a batch in parallel to keep the LLM/GPU busy.
+
+    hermes3:8b via Ollama serves concurrent requests; a small pool pushes
+    throughput while leaving VRAM headroom. Each item is independent and
+    best-effort — one bad chunk never sinks the batch.
+    """
+    def _one(item):
+        did, txt = item
+        try:
+            ents, rels = kg.extract(txt, owner)
+            if ents:
+                kg.store(owner, did, ents, rels)
+        except Exception:
+            pass
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        list(ex.map(_one, batch))
+
+
+def _run_kg_backfill(owner: str, workers: int = 4, batch_size: int = 16) -> None:
+    from src import ingest_gate
+    from src import knowledge_graph as kg
+
+    ingest_gate.activate("kg_backfill", "Backfilling knowledge graph", total=0)
+    try:
+        rag_manager = _get_rag()
+        if rag_manager is None or not kg.is_enabled():
+            logger.warning("kg backfill: RAG unavailable or KG disabled — nothing to do")
+            return
+
+        pairs = _owner_chunks(rag_manager, owner)
+        already = kg.existing_doc_ids(owner)
+        todo = [(did, txt) for did, txt in pairs if did not in already]
+        total = len(todo)
+        ingest_gate.update(total=total, done=0, current=f"0 / {total} chunks")
+        logger.info("kg backfill: owner=%s total_chunks=%d already=%d todo=%d",
+                    owner or "-", len(pairs), len(already), total)
+
+        done = 0
+        for start in range(0, total, batch_size):
+            if ingest_gate.stop_requested():
+                logger.info("kg backfill: interrupted at %d/%d", done, total)
+                break
+            batch = todo[start:start + batch_size]
+            _enrich_batch_concurrent(batch, owner, kg, workers=workers)
+            done += len(batch)
+            ingest_gate.update(done=done, current=f"{done} / {total} chunks")
+        logger.info("kg backfill: finished — enriched up to %d/%d chunk(s) for %s",
+                    done, total, owner or "-")
+    except Exception as exc:
+        logger.error("kg backfill failed: %s", exc)
+    finally:
+        ingest_gate.deactivate()
 
 
 # ── Route factory ─────────────────────────────────────────────────────────────
@@ -443,16 +554,41 @@ def setup_ingest_routes(rag_manager=None, rag_available: bool = False, upload_ha
 
     @router.post("/stop")
     async def ingest_stop(owner: str = Depends(require_user)):
-        """Request a graceful stop. The worker finishes the file it's on, then
-        halts at the next book boundary and marks the rest 'deferred'. Returns
-        the names of files that will be deferred so the UI can show what's left
-        (re-selecting the same folder later is idempotent and resumes them)."""
+        """Request a graceful stop ("Interrupt ASAP"). The worker finishes the
+        unit it's on (current book / current batch), then halts at the next
+        boundary, frees the GPU, and unlocks chat. Works for BOTH the upload
+        ingest and the KG backfill (the shared gate carries the stop flag).
+        Returns deferred upload files (if any) so the UI can show what's left;
+        re-selecting the same folder / re-running the backfill is idempotent."""
+        from src import ingest_gate
+        gate_stopped = ingest_gate.request_stop()
         with _state_lock:
-            if not _state["running"]:
-                return {"ok": True, "running": False, "deferred": []}
-            _state["stop_requested"] = True
-            deferred = [f["name"] for f in _state["files"] if f.get("status") == "queued"]
+            running = _state["running"]
+            if running:
+                _state["stop_requested"] = True
+            deferred = [f["name"] for f in _state["files"]
+                        if f.get("status") == "queued"] if running else []
+        if not (running or gate_stopped):
+            return {"ok": True, "running": False, "deferred": []}
         return {"ok": True, "stopping": True, "deferred": deferred, "deferred_count": len(deferred)}
+
+    @router.get("/gate")
+    async def ingest_gate_status():
+        """Lightweight snapshot of the shared ingest gate for the global chat
+        lock banner (cheap to poll: pure in-memory read)."""
+        from src import ingest_gate
+        return ingest_gate.snapshot()
+
+    @router.post("/backfill-kg")
+    async def ingest_backfill_kg(owner: str = Depends(require_user)):
+        """Enrich every already-embedded chunk for this user into the knowledge
+        graph. Runs in the background behind the shared gate (chat pauses,
+        GPU saturates, Interrupt ASAP halts it). Idempotent + resumable."""
+        from src import ingest_gate
+        if ingest_gate.is_active() or _state["running"]:
+            raise HTTPException(409, "An ingest or backfill is already running")
+        _executor.submit(_run_kg_backfill, owner)
+        return {"ok": True, "started": True}
 
     @router.post("/clear-state")
     async def ingest_clear_state():
