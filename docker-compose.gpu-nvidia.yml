@@ -11,7 +11,13 @@
 # for setup details.
 services:
   odysseus:
-    build: .
+    build:
+      context: .
+      args:
+        # Bake PyMuPDF (AGPL) into the image so the Library PDF viewer and the
+        # ingest->Library mirror work on every startup without a runtime pip
+        # install. Opted in for this self-hosted deploy; see requirements-optional.txt.
+        INSTALL_OPTIONAL: "true"
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000"
     volumes:
@@ -35,7 +41,13 @@ services:
       - LLM_HOST=${LLM_HOST:-localhost}
       - LLM_HOSTS=${LLM_HOSTS:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-}
+      # Reach the HOST's ollama from inside the container. host.docker.internal
+      # resolves to the docker-gateway IP (host-internal, not the LAN); the host
+      # ollama is bound there by scripts/ollama_hostctl.py.
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      # Host-side lifecycle helper the container delegates Start/Stop to. Unset
+      # this for a bare-metal install so in-process launch is used instead.
+      - OLLAMA_HOSTCTL_URL=${OLLAMA_HOSTCTL_URL:-http://host.docker.internal:11436}
       - RESEARCH_LLM_ENDPOINT=${RESEARCH_LLM_ENDPOINT:-}
       - HF_TOKEN=${HF_TOKEN:-}
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
