@@ -391,12 +391,15 @@ def _owner_chunks(rag_manager, owner: str) -> List[tuple]:
     return out
 
 
-def _enrich_batch_concurrent(batch: List[tuple], owner: str, kg, workers: int = 4) -> None:
+def _enrich_batch_concurrent(batch: List[tuple], owner: str, kg, workers: int = 6) -> None:
     """Extract + store a batch in parallel to keep the LLM/GPU busy.
 
     hermes3:8b via Ollama serves concurrent requests; a small pool pushes
     throughput while leaving VRAM headroom. Each item is independent and
     best-effort — one bad chunk never sinks the batch.
+
+    Sized to feed both GPU lanes: 6 workers = 3 per lane (P100 + RTX 4060),
+    matching kg.EXTRACT_MAX_CONCURRENCY so neither GPU idles waiting for dispatch.
     """
     def _one(item):
         did, txt = item
@@ -411,7 +414,7 @@ def _enrich_batch_concurrent(batch: List[tuple], owner: str, kg, workers: int = 
         list(ex.map(_one, batch))
 
 
-def _run_kg_backfill(owner: str, workers: int = 4, batch_size: int = 16) -> None:
+def _run_kg_backfill(owner: str, workers: int = 6, batch_size: int = 16) -> None:
     from src import ingest_gate
     from src import knowledge_graph as kg
 

@@ -45,6 +45,10 @@ services:
       # resolves to the docker-gateway IP (host-internal, not the LAN); the host
       # ollama is bound there by scripts/ollama_hostctl.py.
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      # Extra utility-model lanes for KG extraction (one ollama per GPU), so the
+      # backfill round-robins across both GPUs. Comma-separated host:port; the
+      # 2nd ollama is pinned to the RTX 4060 at host.docker.internal:11500.
+      - KG_EXTRA_UTILITY_URLS=${KG_EXTRA_UTILITY_URLS:-host.docker.internal:11500}
       # Host-side lifecycle helper the container delegates Start/Stop to. Unset
       # this for a bare-metal install so in-process launch is used instead.
       - OLLAMA_HOSTCTL_URL=${OLLAMA_HOSTCTL_URL:-http://host.docker.internal:11436}

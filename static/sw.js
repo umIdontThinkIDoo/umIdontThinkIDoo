@@ -12,7 +12,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v332';
+const CACHE_NAME = 'odysseus-v333';
 
 // Has this SW instance already told clients about a background update? Debounced
 // so a deploy that changes many modules yields ONE prompt, not one per file.

@@ -558,23 +558,51 @@ function _buildIngest(body) {
 
   const kgBtn = body.querySelector('#fg-ingest-kg-btn');
   if (kgBtn) {
+    const KG_BTN_LABEL = kgBtn.textContent;
+    let kgGateTimer = null;
+
+    // Re-sync the button with the server gate so it never gets stuck "running"
+    // after the job finishes OR is interrupted from the chat banner. While the
+    // backfill is active the button stays disabled; once the gate clears, reset
+    // it so the user can run another backfill.
+    const resetKgBtn = () => {
+      if (kgGateTimer) { clearInterval(kgGateTimer); kgGateTimer = null; }
+      kgBtn.disabled = false;
+      kgBtn.textContent = KG_BTN_LABEL;
+    };
+    const watchKgGate = () => {
+      if (kgGateTimer) return;
+      kgGateTimer = setInterval(async () => {
+        try {
+          const g = await fetch(`${API}/api/ingest/gate`, { credentials: 'same-origin' }).then(r => r.json());
+          if (!g.active) resetKgBtn();
+        } catch (_) { /* transient — keep watching */ }
+      }, 3000);
+    };
+
+    // If a backfill is already running when this panel opens, reflect that.
+    fetch(`${API}/api/ingest/gate`, { credentials: 'same-origin' })
+      .then(r => r.json())
+      .then(g => { if (g.active && g.kind === 'kg_backfill') { kgBtn.disabled = true; kgBtn.textContent = 'Backfill running — see chat banner'; watchKgGate(); } })
+      .catch(() => {});
+
     kgBtn.addEventListener('click', async () => {
       if (!confirm('Backfill the knowledge graph for every already-ingested document?\n\nThis runs the utility model over each chunk — it can take a while and pauses chat while the GPU works. You can interrupt at any time from the chat banner.')) return;
       kgBtn.disabled = true;
-      const prev = kgBtn.textContent;
       kgBtn.textContent = 'Starting…';
       try {
         const r = await fetch(`${API}/api/ingest/backfill-kg`, { method: 'POST', credentials: 'same-origin' });
         if (r.ok) {
           kgBtn.textContent = 'Backfill running — see chat banner';
+          watchKgGate();
         } else {
           const d = await r.json().catch(() => ({}));
           alert('Could not start backfill: ' + (d.detail || r.statusText));
-          kgBtn.disabled = false; kgBtn.textContent = prev;
+          resetKgBtn();
         }
       } catch (e) {
         alert('Could not start backfill: ' + e.message);
-        kgBtn.disabled = false; kgBtn.textContent = prev;
+        resetKgBtn();
       }
     });
   }

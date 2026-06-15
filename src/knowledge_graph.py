@@ -43,6 +43,82 @@ MAX_CHUNK_CHARS = 4000          # cap text sent to the extractor
 DEFAULT_EXPAND_SEEDS = 3        # how many top hits seed the 1-hop walk
 DEFAULT_EXPAND_LIMIT = 5        # max neighbour doc_ids pulled into the pool
 
+# Per-chunk extraction is the LLM bottleneck during a big ingest/backfill. The
+# utility model (e.g. hermes3:8b) serves ~1 call at a time per GPU lane, so
+# firing many concurrent extracts just queues them past the request timeout and
+# they get aborted — work lost, graph half-populated. Cap total concurrent
+# utility-model calls across every path (enrich_async threads AND the backfill
+# pool) so each call actually completes. The extract timeout is generous since
+# this is best-effort background work, not a latency-sensitive chat turn.
+#
+# Dual-GPU: list extra utility lanes (one ollama per GPU) in KG_EXTRA_UTILITY_URLS
+# as comma-separated host:port (or full URLs). Each extract is dispatched to the
+# lane with the fewest in-flight calls (join-shortest-queue), so a faster GPU
+# naturally absorbs more work instead of idling behind a 50/50 split. The other
+# lane is still kept as a per-call fallback, so one wedged GPU degrades to
+# single-lane instead of dropping work. Concurrency cap is sized 3 per lane.
+EXTRACT_PER_LANE_CONCURRENCY = 3
+EXTRA_UTILITY_NETLOCS = [
+    s.strip() for s in os.environ.get("KG_EXTRA_UTILITY_URLS", "").split(",") if s.strip()
+]
+EXTRACT_MAX_CONCURRENCY = EXTRACT_PER_LANE_CONCURRENCY * (1 + len(EXTRA_UTILITY_NETLOCS))
+EXTRACT_TIMEOUT_S = 120         # per-call timeout for background extraction
+_extract_sem = threading.Semaphore(EXTRACT_MAX_CONCURRENCY)
+
+# Per-lane in-flight counters for join-shortest-queue lane selection.
+_lane_lock = threading.Lock()
+_lane_inflight: List[int] = []
+
+
+def _swap_netloc(url: str, netloc: str) -> str:
+    """Return ``url`` with its host:port replaced by ``netloc``.
+
+    ``netloc`` may be a bare ``host:port`` or a full ``scheme://host:port`` URL;
+    in the latter case its netloc is used. Preserves the original path so the
+    OpenAI-vs-Ollama chat path stays correct across lanes.
+    """
+    from urllib.parse import urlparse, urlunparse
+    if "://" in netloc:
+        netloc = urlparse(netloc).netloc
+    return urlunparse(urlparse(url)._replace(netloc=netloc))
+
+
+def _utility_lanes(primary):
+    """Pick the per-call lane order by join-shortest-queue.
+
+    ``primary`` is the resolved (url, model, headers). Extra lanes reuse the same
+    model+headers with the host:port swapped to each KG_EXTRA_UTILITY_URLS entry.
+    Returns ``(ordered_lanes, lane_idx)`` where the least-loaded lane leads (and
+    is charged one in-flight slot); the caller must release it via
+    ``_release_lane(lane_idx)`` once the call completes. ``lane_idx`` is None when
+    there is only one lane (nothing to balance).
+    """
+    url, model, headers = primary
+    lanes = [primary]
+    for netloc in EXTRA_UTILITY_NETLOCS:
+        try:
+            lanes.append((_swap_netloc(url, netloc), model, headers))
+        except Exception:
+            pass
+    if len(lanes) <= 1:
+        return lanes, None
+    with _lane_lock:
+        while len(_lane_inflight) < len(lanes):
+            _lane_inflight.append(0)
+        idx = min(range(len(lanes)), key=lambda i: _lane_inflight[i])
+        _lane_inflight[idx] += 1
+    ordered = lanes[idx:] + lanes[:idx]
+    return ordered, idx
+
+
+def _release_lane(lane_idx) -> None:
+    """Release the in-flight slot charged by ``_utility_lanes``."""
+    if lane_idx is None:
+        return
+    with _lane_lock:
+        if 0 <= lane_idx < len(_lane_inflight) and _lane_inflight[lane_idx] > 0:
+            _lane_inflight[lane_idx] -= 1
+
 _conn: Optional[sqlite3.Connection] = None
 _conn_lock = threading.Lock()
 
@@ -235,13 +311,21 @@ def extract(text: str, owner: str) -> Tuple[List[str], List[Tuple[str, str]]]:
             url, model, headers = resolve_endpoint("default", owner=owner)
         if not url or not model:
             return [], []
-        candidates = [(url, model, headers)] + resolve_utility_fallback_candidates(owner=owner)
+        lanes, lane_idx = _utility_lanes((url, model, headers))
+        candidates = lanes + resolve_utility_fallback_candidates(owner=owner)
 
         messages = [
             {"role": "system", "content": _EXTRACT_SYSTEM},
             {"role": "user", "content": text[:MAX_CHUNK_CHARS]},
         ]
-        raw = llm_call_with_fallback(candidates, messages, temperature=0.0, max_tokens=400)
+        try:
+            with _extract_sem:
+                raw = llm_call_with_fallback(
+                    candidates, messages, temperature=0.0,
+                    max_tokens=400, timeout=EXTRACT_TIMEOUT_S,
+                )
+        finally:
+            _release_lane(lane_idx)
         return _parse_extraction(raw)
     except Exception as exc:
         logger.debug("knowledge_graph.extract failed: %s", exc)
