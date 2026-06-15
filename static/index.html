@@ -2347,6 +2347,15 @@
                   <option value="full">Full (draft + critique + revise)</option>
                 </select>
               </div>
+              <div class="settings-row">
+                <label class="settings-label" title="How much reasoning models (Qwen3, QwQ, DeepSeek-R1, etc.) think before answering. Soft prompt-steer — keeps them from spending a full chain-of-thought on simple questions. No effect on non-reasoning models.">Thinking effort</label>
+                <select id="set-thinkingEffort" class="settings-select" style="width:180px;">
+                  <option value="high">High (full, default)</option>
+                  <option value="medium">Medium (as needed)</option>
+                  <option value="low">Low (brief, then answer)</option>
+                  <option value="off">Off (no thinking)</option>
+                </select>
+              </div>
               <div id="set-agentMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
             </div>
           </div>

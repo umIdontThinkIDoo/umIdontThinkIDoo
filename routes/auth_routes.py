@@ -552,6 +552,10 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 val = str(val).strip().lower()
                 if val not in ("off", "auto", "light", "full"):
                     val = "off"
+            elif key == "thinking_effort":
+                val = str(val).strip().lower()
+                if val not in ("off", "low", "medium", "high"):
+                    val = "high"
             current[key] = val
         _save_settings(current)
         return current

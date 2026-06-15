@@ -691,6 +691,33 @@ def _supports_thinking(model: str) -> bool:
     m = model.lower()
     return any(p in m for p in _THINKING_MODEL_PATTERNS)
 
+# Soft, prompt-steered hints for the global "thinking_effort" dial. Providers
+# only expose binary thinking; these nudge reasoning models toward shorter
+# private reasoning. "high" injects nothing (full, unchanged behavior); "off"
+# is handled separately by suppressing thinking where the provider supports it.
+_THINKING_EFFORT_HINTS = {
+    "low": (
+        "Reasoning effort: low. Keep your private thinking to one or two short "
+        "sentences, then give the answer. Do not deliberate at length on simple "
+        "or factual questions."
+    ),
+    "medium": (
+        "Reasoning effort: medium. Think only as much as the question actually "
+        "needs before answering; avoid long, exhaustive deliberation."
+    ),
+}
+
+
+def _thinking_effort() -> str:
+    """Resolve the global thinking-effort setting to one of off/low/medium/high."""
+    try:
+        from src.settings import get_setting
+        val = (get_setting("thinking_effort", "high") or "high").strip().lower()
+    except Exception:
+        val = "high"
+    return val if val in ("off", "low", "medium", "high") else "high"
+
+
 def _convert_openai_content_to_anthropic(content):
     """Convert OpenAI multimodal content blocks to Anthropic format.
 
@@ -1491,6 +1518,25 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
     else:
         messages_copy = non_sys
 
+    # Global "thinking effort" dial. Only meaningful for reasoning models; lets a
+    # user dial Qwen3/QwQ/R1 between terse and full chain-of-thought instead of
+    # the binary on/off providers expose. "low"/"medium" steer via a system hint;
+    # "off" suppresses thinking outright (handled per-provider below).
+    _suppress_thinking = False
+    if _supports_thinking(model):
+        _effort = _thinking_effort()
+        if _effort == "off":
+            _suppress_thinking = True
+        elif _effort in _THINKING_EFFORT_HINTS:
+            hint = _THINKING_EFFORT_HINTS[_effort]
+            if messages_copy and messages_copy[0].get("role") == "system":
+                messages_copy[0] = {
+                    "role": "system",
+                    "content": (messages_copy[0].get("content") or "") + "\n\n" + hint,
+                }
+            else:
+                messages_copy = [{"role": "system", "content": hint}] + messages_copy
+
     if provider == "anthropic":
         target_url = _normalize_anthropic_url(url)
         h = _build_anthropic_headers(headers)
@@ -1504,6 +1550,9 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             model, messages_copy, temperature, max_tokens,
             stream=True, tools=tools, num_ctx=get_context_length(url, model),
         )
+        # thinking_effort == "off": Ollama /api/chat honors top-level "think".
+        if _suppress_thinking:
+            payload["think"] = False
     elif provider == "chatgpt-subscription":
         target_url = _normalize_chatgpt_subscription_url(url)
         h = _provider_headers(provider, headers)

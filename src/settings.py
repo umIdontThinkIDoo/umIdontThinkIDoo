@@ -110,6 +110,15 @@ DEFAULT_SETTINGS = {
     #             substantive turns (trivial greetings stay cheap).
     #   "full"  — force draft + self-critique + revise + validate on those turns.
     "process_level": "off",
+    # Soft "thinking effort" dial for reasoning models (Qwen3, QwQ, DeepSeek-R1,
+    # etc.). Providers only expose binary thinking on/off; this steers the model
+    # toward shorter or longer private reasoning via a prompt hint so it doesn't
+    # spend a full chain-of-thought on trivial questions.
+    #   "high"   — full reasoning (default; no hint injected, unchanged behavior).
+    #   "medium" — think only as much as the question needs.
+    #   "low"    — a sentence or two of reasoning, then answer.
+    #   "off"    — suppress thinking entirely where the provider supports it.
+    "thinking_effort": "high",
     "agent_input_token_budget": 6000,
     # Ceiling on the *auto-derived* input budget that #1230 introduced. Has
     # no effect when `agent_input_token_budget` is explicitly set (the user's

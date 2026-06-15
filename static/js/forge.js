@@ -588,6 +588,7 @@ export function openIngest() {
 
 const INTERVIEW_QUESTIONS = [
   "What's your name, and what do you do professionally?",
+  "Where do you live (city or region)? It helps me with weather, time, and local context.",
   "What are the main topics or domains you work in or care deeply about?",
   "What are your biggest ongoing projects right now?",
   "How do you prefer to receive information — detailed explanations, bullet points, or quick summaries?",
@@ -641,7 +642,7 @@ function _buildPersonalizer(body) {
     chatEl.scrollTop = chatEl.scrollHeight;
   }
 
-  async function _saveMemory(content, category, source) {
+  async function _saveMemory(content, category, source, pinned) {
     try {
       // The /api/memory/add route requires a `text` field (MemoryAddRequest.text);
       // sending `content` 422s and the interview would silently save nothing.
@@ -649,7 +650,7 @@ function _buildPersonalizer(body) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
-        body: JSON.stringify({ text: content, category: category || 'identity', source: source || 'personalizer' }),
+        body: JSON.stringify({ text: content, category: category || 'identity', source: source || 'personalizer', pinned: !!pinned }),
       });
     } catch (_) {}
   }
@@ -720,7 +721,10 @@ function _buildPersonalizer(body) {
     _addMsg('user', answer);
     state.transcript.push({ role: 'user', content: answer });
     const qText = state.lastQuestion || '';
-    await _saveMemory(qText ? `${qText} — ${answer}` : answer, 'identity');
+    // Pin interview answers: these are durable identity facts the user explicitly
+    // taught, so they should always be in chat context (e.g. where they live),
+    // not gated behind relevance retrieval that a "what's the weather" turn misses.
+    await _saveMemory(qText ? `${qText} — ${answer}` : answer, 'identity', 'personalizer', true);
     await _askNext();
   }
 

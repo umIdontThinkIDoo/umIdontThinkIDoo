@@ -65,11 +65,22 @@ def test_strips_think_block(monkeypatch):
     assert out["done"] is False
 
 
-def test_sentinel_marks_done(monkeypatch):
+def test_sentinel_marks_done_after_floor(monkeypatch):
+    # The sentinel only completes once the minimum number of answers (8) is met.
     interview, _ = _router(monkeypatch, reply="[INTERVIEW_COMPLETE]")
-    out = asyncio.run(interview(request=_req({"transcript": [{"role": "user", "content": "x"}]})))
+    transcript = [{"role": "user", "content": f"a{i}"} for i in range(8)]
+    out = asyncio.run(interview(request=_req({"transcript": transcript})))
     assert out["done"] is True
     assert out["question"] == ""
+
+
+def test_premature_sentinel_keeps_going(monkeypatch):
+    # Small models often emit the sentinel too early; below the floor we keep
+    # asking (here the model gave only the sentinel, so a scripted fallback fires).
+    interview, _ = _router(monkeypatch, reply="[INTERVIEW_COMPLETE]")
+    out = asyncio.run(interview(request=_req({"transcript": [{"role": "user", "content": "x"}]})))
+    assert out["done"] is False
+    assert out["question"]  # a fallback question, not empty
 
 
 def test_cold_start_nudges_model(monkeypatch):

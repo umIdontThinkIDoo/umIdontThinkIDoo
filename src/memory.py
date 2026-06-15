@@ -242,8 +242,13 @@ class MemoryManager:
             json.dump(entries, f, ensure_ascii=False, indent=2)
         os.replace(tmp_file, self.memory_file)
     
-    def add_entry(self, text: str, source: str = "user", category: str = "fact", owner: str = None) -> Dict:
-        """Add a new memory entry."""
+    def add_entry(self, text: str, source: str = "user", category: str = "fact", owner: str = None, pinned: bool = False) -> Dict:
+        """Add a new memory entry.
+
+        ``pinned`` entries are always injected into chat context (never gated by
+        relevance retrieval), so durable identity facts like name/location stay
+        available on every turn — see chat_processor's memory preface.
+        """
         if not text.strip():
             raise ValueError("Memory text cannot be empty")
 
@@ -255,6 +260,8 @@ class MemoryManager:
             "category": category,
             "uses": 0,
         }
+        if pinned:
+            entry["pinned"] = True
         if owner:
             entry["owner"] = owner
         return entry

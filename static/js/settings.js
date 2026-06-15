@@ -1637,6 +1637,7 @@ async function initAgentSettings() {
   var roundsInput = el('set-agentMaxRounds');
   var supInput = el('set-agentSupervisorLadder');
   var procInput = el('set-processLevel');
+  var thinkInput = el('set-thinkingEffort');
   var msg = el('set-agentMsg');
   if (!toolsInput) return;
 
@@ -1647,6 +1648,7 @@ async function initAgentSettings() {
     if (roundsInput && settings.agent_max_rounds) roundsInput.value = settings.agent_max_rounds;
     if (supInput) supInput.checked = !!settings.agent_supervisor_ladder;
     if (procInput && settings.process_level) procInput.value = settings.process_level;
+    if (thinkInput && settings.thinking_effort) thinkInput.value = settings.thinking_effort;
   } catch (e) {}
 
   // Clamp + coerce a raw input to an int in [lo, hi]; falls back to `dflt`
@@ -1666,6 +1668,7 @@ async function initAgentSettings() {
     if (rounds != null) payload.agent_max_rounds = rounds;
     if (supInput) payload.agent_supervisor_ladder = !!supInput.checked;
     if (procInput) payload.process_level = procInput.value;
+    if (thinkInput) payload.thinking_effort = thinkInput.value;
     try {
       await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },

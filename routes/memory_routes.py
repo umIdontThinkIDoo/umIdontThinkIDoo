@@ -84,6 +84,41 @@ def _parse_suggestion_text(suggestion_text: str) -> List[str]:
     ]
 
 
+def _mirror_memory_to_rag_kg(text: str, owner: str, category: str) -> None:
+    """Best-effort: mirror a saved memory into vector RAG and enrich the
+    knowledge graph from it.
+
+    This lets durable user facts (e.g. personalizer interview answers) become
+    first-class graph nodes — so relations like "Dari -> lives in -> Lisbon"
+    are extracted and traversable, and KG query-time expansion (rag_vector.
+    _kg_expand) can pull related facts into chat context. Owner-scoped, never
+    blocks the save, and a failure can't fault adding the memory.
+    """
+    if not text or not owner:
+        return
+    try:
+        from src.rag_singleton import get_rag_manager
+        from src.rag_vector import _generate_doc_id
+
+        rag = get_rag_manager()
+        if not rag:
+            return
+        meta = {
+            "owner": owner,
+            "source": "memory",
+            "filename": "memory",
+            "category": category or "fact",
+            "ingest_source": "personalizer",
+        }
+        if hasattr(rag, "add_document"):
+            rag.add_document(text, meta)
+
+        from src import knowledge_graph as kg
+        kg.enrich_async([(_generate_doc_id(text, owner), text)], owner)
+    except Exception:
+        logger.debug("memory -> RAG/KG mirror skipped", exc_info=True)
+
+
 def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionManager, memory_vector=None):
     """Set up memory-related routes."""
     router = APIRouter(prefix="/api/memory", tags=["memory"])
@@ -144,7 +179,8 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 text=form.get("text"),
                 category=form.get("category", "fact"),
                 source=form.get("source", "user"),
-                session_id=form.get("session_id")
+                session_id=form.get("session_id"),
+                pinned=str(form.get("pinned", "")).strip().lower() in ("1", "true", "yes", "on"),
             )
 
         user = _owner(request)
@@ -155,7 +191,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         if memory_manager.find_duplicates(text, user_mem):
             return {"ok": True, "count": len(user_mem), "message": "Memory already exists"}
 
-        new_entry = memory_manager.add_entry(text, memory_data.source, memory_data.category, owner=user)
+        new_entry = memory_manager.add_entry(text, memory_data.source, memory_data.category, owner=user, pinned=bool(memory_data.pinned))
         if memory_data.session_id:
             new_entry["session_id"] = memory_data.session_id
         all_mem = memory_manager.load_all()
@@ -164,6 +200,12 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         # Sync vector index
         if memory_vector and memory_vector.healthy:
             memory_vector.add(new_entry["id"], text)
+        # Personalizer (and other interview-sourced) facts feed the RAG +
+        # knowledge graph so relationships become traversable. Scoped to
+        # personalizer sources to avoid duplicating ad-hoc /remember notes
+        # that already retrieve via the memory channel.
+        if str(memory_data.source or "").startswith("personalizer"):
+            _mirror_memory_to_rag_kg(text, user, memory_data.category)
         try:
             from src.event_bus import fire_event
             fire_event("memory_added", user)
@@ -324,13 +366,14 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 "durable facts about the user so future conversations can be personalised. "
                 "Ask exactly ONE question per turn. Build on what they've already told you: ask natural "
                 "follow-ups, dig deeper on anything vague, and never repeat a question already answered. "
-                "Cover, over the course of the interview: who they are and what they do, the domains and "
-                "projects they care about, how they like information delivered, their goals, hard "
-                "preferences/things to avoid, time zone/working hours, and their tech stack if relevant. "
+                "Cover, over the course of the interview: who they are and what they do, where they live "
+                "(city/region — useful for weather, time, local context), the domains and projects they "
+                "care about, how they like information delivered, their goals, hard preferences/things to "
+                "avoid, time zone/working hours, and their tech stack if relevant. "
                 "Keep each question to one or two sentences, friendly and specific. Do NOT summarise their "
                 "answers back to them and do NOT preface with filler — just ask the next question. "
-                f"When you have gathered enough to personalise well (typically 7–10 exchanges), reply with "
-                f"exactly {DONE_SENTINEL} and nothing else."
+                f"Ask at least 8 questions before finishing. Only once you have genuinely covered the areas "
+                f"above (typically 8–12 exchanges) reply with exactly {DONE_SENTINEL} and nothing else."
             ),
         }
 
@@ -366,9 +409,35 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             if reply:
                 break
 
+        # Minimum-exchanges floor: small local models often emit the completion
+        # sentinel after only a couple of answers. Don't honor "done" until the
+        # user has actually answered enough questions to personalise well.
+        MIN_ANSWERS = 8
+        user_answers = sum(
+            1 for t in raw_transcript
+            if isinstance(t, dict) and t.get("role") == "user" and str(t.get("content") or "").strip()
+        )
+
         if DONE_SENTINEL in reply:
-            # Model decided it has learned enough.
-            return {"question": reply.replace(DONE_SENTINEL, "").strip(), "done": True}
+            stripped_q = reply.replace(DONE_SENTINEL, "").strip()
+            if user_answers >= MIN_ANSWERS:
+                # Model decided it has learned enough, and the floor is met.
+                return {"question": stripped_q, "done": True}
+            # Premature stop: keep going. Use any question the model still gave,
+            # else fall back to one of the scripted areas not yet covered.
+            if stripped_q:
+                return {"question": stripped_q, "done": False}
+            FALLBACK = [
+                "Where do you live (city or region)? It helps with weather, time, and local context.",
+                "What are the main topics or domains you care most about?",
+                "What are your biggest ongoing projects right now?",
+                "How do you prefer information delivered — detail, bullets, or quick summaries?",
+                "What time zone are you in, and when are you most active?",
+                "Any strong preferences or things I should always avoid?",
+                "What are your current goals, personal or professional?",
+                "Anything else fundamental about you I should always remember?",
+            ]
+            return {"question": FALLBACK[min(user_answers, len(FALLBACK) - 1)], "done": False}
 
         if not reply:
             # Empty output is a model hiccup, NOT completion — surface it so the
