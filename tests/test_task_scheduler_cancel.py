@@ -64,6 +64,11 @@ def test_stop_task_cleans_up_queued_handle_and_run(tmp_path, monkeypatch):
         scheduler._task_handles = {}
         scheduler._concurrency_cap = 1
         scheduler._task_defer_counts = {}
+        scheduler._pending_notifications = []
+        # Pin the lock/semaphore to this loop so _sync_to_loop() does not rebind
+        # (and silently replace) the semaphore we deliberately pre-acquire below
+        # to force "queued-task" to wait behind the slot.
+        scheduler._lock_loop = asyncio.get_running_loop()
         await scheduler._run_semaphore.acquire()
 
         task = asyncio.create_task(scheduler._execute_task("queued-task"))

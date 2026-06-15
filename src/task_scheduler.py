@@ -272,9 +272,11 @@ class TaskScheduler:
         loop. Call from inside the running loop before acquiring either.
         """
         loop = asyncio.get_running_loop()
-        if self._lock_loop is not loop:
+        # getattr default tolerates instances built via __new__ (test helpers and
+        # any pre-_lock_loop construction path) that never ran through __init__.
+        if getattr(self, "_lock_loop", None) is not loop:
             self._executing_lock = asyncio.Lock()
-            self._run_semaphore = asyncio.Semaphore(self._concurrency_cap)
+            self._run_semaphore = asyncio.Semaphore(getattr(self, "_concurrency_cap", 1))
             self._lock_loop = loop
 
     def _exec_lock(self):

@@ -58,7 +58,7 @@ def test_upload_attributes_owner_from_auth_not_admin(monkeypatch):
     (here the internal-tool identity), not a hardcoded "admin" fallback."""
     captured = {}
 
-    def _fake_run(files_data, rag_manager, owner):
+    def _fake_run(files_data, rag_manager, owner, upload_handler=None):
         captured["owner"] = owner
 
     monkeypatch.setattr(ing, "_run_ingest_job", _fake_run)
