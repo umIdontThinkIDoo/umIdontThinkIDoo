@@ -2,7 +2,7 @@
 # One-click launcher: starts the Odysseus NVIDIA GPU stack and opens the browser.
 #
 # Install:
-#   chmod +x /media/dari/Above-Average/odysseus/scripts/launch-odysseus.sh
+#   chmod +x /home/dari/odysseus-fixed/scripts/launch-odysseus.sh
 #   cp scripts/odysseus.desktop.template ~/.local/share/applications/odysseus.desktop
 #   update-desktop-database ~/.local/share/applications/
 #
@@ -11,7 +11,7 @@
 set -uo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
-PROJECT="${ODYSSEUS_DIR:-/media/dari/Above-Average/odysseus}"
+PROJECT="${ODYSSEUS_DIR:-/home/dari/odysseus-fixed}"
 PORT="${APP_PORT:-7000}"
 COMPOSE_FILE="docker-compose.gpu-nvidia.yml"
 LOG="/tmp/odysseus-launch.log"

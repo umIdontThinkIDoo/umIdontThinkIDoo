@@ -112,7 +112,17 @@ def ingest_text(
     if not res.get("success"):
         logger.debug("web_ingest: batch not stored for %s: %s", source, res.get("message"))
         return 0
-    return int(res.get("added_count", 0))
+    added = int(res.get("added_count", 0))
+    # Best-effort knowledge-graph enrichment, keyed to the same deterministic doc
+    # ids the RAG store derives, so web-search / deep-research pages contribute
+    # entities + relations too. Async + guarded: never blocks or faults ingest.
+    try:
+        from src import knowledge_graph as kg
+        from src.rag_vector import _generate_doc_id
+        kg.enrich_async([(_generate_doc_id(chunk, owner), chunk) for chunk, _m in docs], owner)
+    except Exception:
+        pass
+    return added
 
 
 def ingest_web_pages(query: str, pages: List[Dict[str, Any]], owner: str) -> int:

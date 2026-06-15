@@ -243,6 +243,19 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
                     else:
                         total_failed += 1
 
+                # Best-effort knowledge-graph enrichment, keyed to the same
+                # deterministic doc ids the RAG store derives, so personal-doc
+                # uploads contribute entities + relations too. Async + guarded.
+                try:
+                    from src import knowledge_graph as kg
+                    from src.rag_vector import _generate_doc_id
+                    kg.enrich_async(
+                        [(_generate_doc_id(chunk, user), chunk) for chunk in chunks],
+                        user,
+                    )
+                except Exception:
+                    pass
+
                 uploaded_files.append(safe_name)
             except Exception as e:
                 logger.error(f"Failed to upload/index {upload.filename}: {e}")
