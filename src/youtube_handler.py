@@ -225,7 +225,14 @@ def extract_transcript_ytdlp_sync(
     timedtext gating). Downloads manual + auto English subs as VTT, parses, dedupes.
     """
     ytdlp = _find_ytdlp()
-    langs = ",".join([f"{l}.*" for l in languages] + list(languages)) or "en.*,en"
+    # Exact subtitle codes only. A trailing-".*" regex (e.g. "en.*") makes yt-dlp
+    # enumerate and download every matching auto-caption + auto-translate variant,
+    # which on a long video takes ~120s and trips our timeout; exact codes stay
+    # ~10s. "-orig" is YouTube's original-language track for auto-dubbed videos.
+    _codes: list[str] = []
+    for _l in languages:
+        _codes += [_l, f"{_l}-orig"]
+    langs = ",".join(dict.fromkeys(_codes)) or "en,en-orig"
     with tempfile.TemporaryDirectory() as tmp:
         out_tmpl = str(Path(tmp) / "%(id)s")
         cmd = [
@@ -236,6 +243,14 @@ def extract_transcript_ytdlp_sync(
             "--sub-langs", langs,
             "--sub-format", "vtt",
             "--no-warnings",
+            # Pin ONLY the JS-runtime-free "android" client: it returns captions
+            # in ~9s. yt-dlp *queries every listed client and merges*, so adding a
+            # "web" fallback isn't free — the modern web client needs a JS runtime
+            # (deno) we don't ship, so it falls back to a deprecated path that
+            # takes 90s+ and trips our timeout on every call. android alone is the
+            # most reliable single client; if it ever fails we degrade to
+            # metadata-only rather than hang.
+            "--extractor-args", "youtube:player_client=android",
             "-o", out_tmpl,
             f"https://www.youtube.com/watch?v={video_id}",
         ]

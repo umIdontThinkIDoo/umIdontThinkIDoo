@@ -273,7 +273,20 @@ def _fetch_youtube_content(url: str, timeout: int = 90) -> dict | None:
     success = has_transcript or bool(title)
     error = "" if success else (tdata.get("error") or "transcript unavailable")
 
+    # Distinguish a *transient* transcript failure (timeout / tool / network) from
+    # a video that genuinely has no captions. The former must not be cached for
+    # 2h — otherwise one hiccup hides the transcript until the entry expires and
+    # we serve metadata-only for a video that does have captions. "no subtitles"
+    # / "empty transcript" are treated as stable (the video simply has none).
+    terr = (tdata.get("error") or "").lower()
+    transient_transcript_failure = (not tdata.get("success")) and not any(
+        s in terr for s in ("no subtitles", "empty transcript")
+    )
+
     return {
+        # Private hint to fetch_webpage_content: skip caching transient failures
+        # so the transcript is retried on the next request. Popped before return.
+        "_cache_ok": not transient_transcript_failure,
         "url": url,
         "title": title or f"YouTube video {video_id}",
         "content": content,
@@ -331,7 +344,10 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0) ->
     if _is_youtube_url(url):
         yt_result = _fetch_youtube_content(url)
         if yt_result is not None:
-            _cache_result(cache_file, cache_key, yt_result, url)
+            # pop() strips the private hint; skip caching transient transcript
+            # failures so they're retried next time (see _fetch_youtube_content).
+            if yt_result.pop("_cache_ok", True):
+                _cache_result(cache_file, cache_key, yt_result, url)
             return yt_result
         # else: channel/playlist/search URL — fall through to normal HTML fetch.
 
