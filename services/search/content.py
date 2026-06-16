@@ -220,6 +220,88 @@ def _empty_result(url: str, error: str = "") -> dict:
 
 
 # ----------------------------------------------------------------------
+# YouTube handling
+# ----------------------------------------------------------------------
+def _is_youtube_url(url: str) -> bool:
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return host in ("www.youtube.com", "youtube.com", "m.youtube.com", "youtu.be") or host.endswith(".youtube.com")
+
+
+# Cap the transcript stored in a single result. A 4-hour video is ~36k words;
+# downstream prompt builders / Library ingest truncate further, but this keeps
+# any one cache entry from ballooning.
+_YT_TRANSCRIPT_MAX = 60_000
+
+
+def _fetch_youtube_content(url: str, timeout: int = 90) -> dict | None:
+    """Build a content result for a YouTube *video* from real metadata + transcript.
+
+    Scraping the watch-page HTML yields only player chrome, so for YouTube we use
+    the oEmbed endpoint (title/channel, no token) and yt-dlp/transcript-api
+    (captions). Returns ``None`` for non-video URLs (channels, playlists, search)
+    so the caller falls back to the normal HTML fetch.
+    """
+    try:
+        from src import youtube_handler as yt
+    except Exception as e:  # youtube_handler optional/unavailable
+        logger.debug("youtube_handler unavailable, falling back to HTML fetch: %s", e)
+        return None
+
+    video_id = yt.extract_youtube_id(url)
+    if not video_id:
+        return None  # not a single video — let normal fetch handle it
+
+    meta = yt.fetch_metadata_oembed(url)
+    tdata = yt.extract_transcript_sync(url, video_id, ytdlp_timeout=timeout)
+
+    title = meta.get("title") or ""
+    channel = meta.get("channel") or ""
+    transcript = tdata.get("transcript", "") if tdata.get("success") else ""
+
+    truncated = False
+    content = transcript
+    if len(content) > _YT_TRANSCRIPT_MAX:
+        content = content[:_YT_TRANSCRIPT_MAX] + " … [transcript truncated]"
+        truncated = True
+
+    has_transcript = bool(transcript)
+    # Succeed if we got *anything* real (transcript or at least verified metadata),
+    # so callers don't fall through to a useless chrome scrape.
+    success = has_transcript or bool(title)
+    error = "" if success else (tdata.get("error") or "transcript unavailable")
+
+    return {
+        "url": url,
+        "title": title or f"YouTube video {video_id}",
+        "content": content,
+        "lists": [],
+        "tables": [],
+        "code_blocks": [],
+        "meta_description": (f"YouTube video by {channel}" if channel else "YouTube video"),
+        "meta_keywords": "",
+        "og_image": meta.get("thumbnail", ""),
+        "js_rendered": False,
+        "js_message": "",
+        "success": success,
+        "error": error,
+        "media_type": "youtube",
+        "youtube": {
+            "video_id": video_id,
+            "channel": channel,
+            "channel_url": meta.get("channel_url", ""),
+            "is_generated": tdata.get("is_generated"),
+            "transcript_engine": tdata.get("engine", ""),
+            "transcript_chars": len(transcript),
+            "has_transcript": has_transcript,
+            "truncated": truncated,
+        },
+    }
+
+
+# ----------------------------------------------------------------------
 # Main content fetcher
 # ----------------------------------------------------------------------
 def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0) -> dict:
@@ -243,6 +325,15 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0) ->
             logger.warning(f"Failed to read content cache for {url}: {e}")
             cache_file.unlink(missing_ok=True)
             content_cache_index.pop(cache_key, None)
+
+    # YouTube videos: the watch-page HTML is player chrome with no transcript.
+    # Resolve real metadata + captions instead, then cache like any other page.
+    if _is_youtube_url(url):
+        yt_result = _fetch_youtube_content(url)
+        if yt_result is not None:
+            _cache_result(cache_file, cache_key, yt_result, url)
+            return yt_result
+        # else: channel/playlist/search URL — fall through to normal HTML fetch.
 
     # Fetch
     try:

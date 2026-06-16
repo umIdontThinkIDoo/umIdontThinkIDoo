@@ -4,10 +4,16 @@ and context formatting for LLM injection. Used by chat_handler.py.
 """
 
 import asyncio
+import glob
+import html
 import json
 import logging
+import os
+import re
 import shutil
+import subprocess
 import sys
+import tempfile
 import urllib.parse
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -66,6 +72,8 @@ def is_youtube_url(url: str) -> bool:
 
 def extract_youtube_id(url: str) -> Optional[str]:
     """Extract YouTube video ID from various URL formats."""
+    if not isinstance(url, str):
+        return None
     parsed = urllib.parse.urlparse(url)
     if parsed.hostname in ("www.youtube.com", "youtube.com", "m.youtube.com"):
         if parsed.path == "/watch":
@@ -79,31 +87,202 @@ def extract_youtube_id(url: str) -> Optional[str]:
     return None
 
 
-async def extract_transcript_async(
-    url: str, video_id: str, max_retries: int = 3
+def _fmt_ts(seconds: float) -> str:
+    """Format seconds as H:MM:SS for long videos, MM:SS for short ones."""
+    s = int(seconds)
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{sec:02d}"
+    return f"{m:02d}:{sec:02d}"
+
+
+def fetch_metadata_oembed(url_or_id: str, timeout: int = 10) -> Dict[str, Any]:
+    """Fetch video title/channel/thumbnail via YouTube's oEmbed endpoint.
+
+    oEmbed needs no API key and no proof-of-origin token, so it stays reliable
+    where the watch-page scrape and the timedtext endpoint do not. Best-effort:
+    returns {} on any failure.
+    """
+    vid = extract_youtube_id(url_or_id) or (url_or_id if "/" not in url_or_id else "")
+    target = url_or_id if "youtu" in url_or_id else f"https://www.youtube.com/watch?v={vid}"
+    try:
+        import httpx
+
+        r = httpx.get(
+            "https://www.youtube.com/oembed",
+            params={"url": target, "format": "json"},
+            timeout=timeout,
+            follow_redirects=True,
+        )
+        if r.status_code != 200:
+            return {}
+        d = r.json()
+        return {
+            "title": d.get("title", ""),
+            "channel": d.get("author_name", ""),
+            "channel_url": d.get("author_url", ""),
+            "thumbnail": d.get("thumbnail_url", ""),
+        }
+    except Exception as e:  # never fatal
+        logger.debug("oEmbed metadata failed for %s: %s", target, e)
+        return {}
+
+
+def _parse_vtt(vtt_text: str):
+    """Parse a WebVTT subtitle blob into (full_text, segments).
+
+    Auto-generated captions arrive as overlapping "rolling" cues with inline
+    word-timing tags (``<00:00:01.234>``). We strip the inline tags, drop exact
+    repeats, then merge cues by their longest word-overlap so the running text
+    reads once rather than echoing every line. ``segments`` buckets the text into
+    ~30s windows so callers can still cite approximate timestamps.
+    """
+    ts_re = re.compile(r"(\d\d):(\d\d):(\d\d)\.\d{3}\s+-->")
+    cues = []  # (start_sec, text)
+    cur = None
+    buf: list = []
+
+    def _flush():
+        nonlocal cur, buf
+        if cur is not None and buf:
+            cues.append((cur, " ".join(buf)))
+        buf = []
+
+    for ln in vtt_text.splitlines():
+        m = ts_re.match(ln)
+        if m:
+            _flush()
+            cur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+            continue
+        if "-->" in ln or not ln.strip() or ln.startswith(("WEBVTT", "Kind:", "Language:", "NOTE")):
+            continue
+        t = re.sub(r"<[^>]+>", "", ln)  # strip inline word-timing / styling tags
+        t = html.unescape(t)            # &nbsp;/&amp;/&#39; -> real chars
+        t = re.sub(r"\s+", " ", t).strip()  # collapses NBSP (\xa0) too
+        if t:
+            buf.append(t)
+    _flush()
+
+    # Drop consecutive exact duplicates (common in rolling auto-captions).
+    deduped = []
+    for start, txt in cues:
+        if deduped and txt == deduped[-1][1]:
+            continue
+        deduped.append((start, txt))
+
+    BUCKET = 30  # seconds per timestamped segment
+    merged = ""
+    segments: list = []
+    bucket_idx = None
+    bucket_start = 0
+    bucket_words: list = []
+
+    def _push_bucket():
+        if bucket_words:
+            segments.append({
+                "text": " ".join(bucket_words).strip(),
+                "start": float(bucket_start),
+                "duration": 0.0,
+                "timestamp": _fmt_ts(bucket_start),
+            })
+
+    for start, txt in deduped:
+        if not merged:
+            novel = txt
+            merged = txt
+        else:
+            mw = merged.split()
+            tw = txt.split()
+            ov = 0
+            for k in range(min(len(mw), len(tw), 20), 0, -1):
+                if mw[-k:] == tw[:k]:
+                    ov = k
+                    break
+            novel = " ".join(tw[ov:])
+            if novel:
+                merged += " " + novel
+        bi = start // BUCKET
+        if bucket_idx is None:
+            bucket_idx = bi
+            bucket_start = start
+        elif bi != bucket_idx:
+            _push_bucket()
+            bucket_words = []
+            bucket_idx = bi
+            bucket_start = start
+        if novel:
+            bucket_words.append(novel)
+    _push_bucket()
+
+    return merged.strip(), segments
+
+
+def extract_transcript_ytdlp_sync(
+    video_id: str, languages=("en",), timeout: int = 90
 ) -> Dict[str, Any]:
+    """Extract a transcript via yt-dlp subtitles (the path that survives YouTube's
+    timedtext gating). Downloads manual + auto English subs as VTT, parses, dedupes.
     """
-    Async YouTube transcript extraction with retries.
+    ytdlp = _find_ytdlp()
+    langs = ",".join([f"{l}.*" for l in languages] + list(languages)) or "en.*,en"
+    with tempfile.TemporaryDirectory() as tmp:
+        out_tmpl = str(Path(tmp) / "%(id)s")
+        cmd = [
+            ytdlp,
+            "--skip-download",
+            "--write-subs",
+            "--write-auto-subs",
+            "--sub-langs", langs,
+            "--sub-format", "vtt",
+            "--no-warnings",
+            "-o", out_tmpl,
+            f"https://www.youtube.com/watch?v={video_id}",
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": "yt-dlp transcript timed out", "transcript": None}
+        except FileNotFoundError:
+            return {"success": False, "error": "yt-dlp not installed", "transcript": None}
 
-    Args:
-        url: Full YouTube URL
-        video_id: Extracted video ID
-        max_retries: Number of attempts
+        vtts = sorted(glob.glob(str(Path(tmp) / "*.vtt")))
+        if not vtts:
+            err = (proc.stderr or "").strip().splitlines()
+            tail = err[-1] if err else "no subtitles available"
+            return {"success": False, "error": f"no subtitles ({tail[:160]})", "transcript": None}
 
-    Returns:
-        Dict with success/error/transcript keys
-    """
-    if not YOUTUBE_AVAILABLE or YouTubeTranscriptApi is None:
-        return {"success": False, "error": "YouTube transcript API not available", "transcript": None}
+        try:
+            vtt_text = Path(vtts[0]).read_text(encoding="utf-8", errors="ignore")
+        except Exception as e:
+            return {"success": False, "error": f"read sub failed: {e}", "transcript": None}
 
-    for attempt in range(max_retries):
+    full_text, segments = _parse_vtt(vtt_text)
+    if not full_text:
+        return {"success": False, "error": "empty transcript after parse", "transcript": None}
+
+    # Inline word-timing tags only appear in auto-generated captions.
+    is_generated = bool(re.search(r"<\d\d:\d\d:\d\d\.\d{3}>", vtt_text))
+    return {
+        "success": True,
+        "transcript": full_text,
+        "video_id": video_id,
+        "language": languages[0] if languages else "en",
+        "is_generated": is_generated,
+        "segments": segments,
+        "engine": "yt-dlp",
+    }
+
+
+def extract_transcript_sync(url: str, video_id: str, ytdlp_timeout: int = 90) -> Dict[str, Any]:
+    """Best-effort transcript: try youtube-transcript-api (cheap when it works),
+    then fall back to yt-dlp subtitles (robust against POT-token gating)."""
+    if YOUTUBE_AVAILABLE and YouTubeTranscriptApi is not None:
         try:
             api = YouTubeTranscriptApi()
             transcript = api.fetch(video_id)
-            transcript_list = list(transcript)
-
             formatted = []
-            for snippet in transcript_list:
+            for snippet in transcript:
                 text = snippet.text.strip()
                 if not text:
                     continue
@@ -112,28 +291,34 @@ async def extract_transcript_async(
                     "text": text,
                     "start": start,
                     "duration": snippet.duration,
-                    "timestamp": f"{int(start // 60):02d}:{int(start % 60):02d}",
+                    "timestamp": _fmt_ts(start),
                 })
-
-            full_text = " ".join(e["text"] for e in formatted)
-            max_len = 8000
-            if len(full_text) > max_len:
-                full_text = full_text[:max_len] + "... [transcript truncated]"
-
-            return {
-                "success": True,
-                "transcript": full_text,
-                "video_id": video_id,
-                "language": "en",
-                "is_generated": False,
-                "segments": formatted,
-            }
+            if formatted:
+                return {
+                    "success": True,
+                    "transcript": " ".join(e["text"] for e in formatted),
+                    "video_id": video_id,
+                    "language": "en",
+                    "is_generated": False,
+                    "segments": formatted,
+                    "engine": "youtube-transcript-api",
+                }
         except Exception as e:
-            logger.warning(f"Transcript attempt {attempt + 1} failed: {e}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(1 * (attempt + 1))
+            logger.info("transcript-api failed for %s (%s); falling back to yt-dlp", video_id, e)
 
-    return {"success": False, "error": f"Failed after {max_retries} attempts", "transcript": None}
+    return extract_transcript_ytdlp_sync(video_id, timeout=ytdlp_timeout)
+
+
+async def extract_transcript_async(
+    url: str, video_id: str, max_retries: int = 3
+) -> Dict[str, Any]:
+    """Async wrapper around :func:`extract_transcript_sync` (runs the blocking
+    API/yt-dlp work in a thread so the event loop is never stalled)."""
+    try:
+        return await asyncio.to_thread(extract_transcript_sync, url, video_id)
+    except Exception as e:
+        logger.warning("transcript extraction failed for %s: %s", video_id, e)
+        return {"success": False, "error": str(e), "transcript": None}
 
 
 def format_transcript_for_context(
@@ -231,6 +416,8 @@ async def fetch_youtube_comments(
 
         comments = []
         for c in raw_comments[:max_comments]:
+            if not isinstance(c, dict):
+                continue
             text = (c.get("text") or "").strip()
             if not text:
                 continue

@@ -18,6 +18,10 @@ numpy
 chromadb-client
 fastembed
 youtube-transcript-api
+# yt-dlp: robust YouTube transcript + comment extraction. youtube-transcript-api
+# alone now fails on YouTube's timedtext POT-token gating; yt-dlp is the fallback
+# used by src/youtube_handler.py and the web-search YouTube path.
+yt-dlp
 # Markdown rendering for research reports (src/visual_report.py).
 # Imported at module-top so it's a hard core dep, not optional.
 markdown
